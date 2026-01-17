@@ -1,0 +1,41 @@
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  background-color: #0c1116;
+}
+
+body {
+  @apply min-h-screen text-slate-100;
+  background: radial-gradient(circle at 20% 20%, rgba(58, 107, 255, 0.15), transparent 40%),
+    radial-gradient(circle at 80% 10%, rgba(255, 173, 67, 0.22), transparent 45%),
+    linear-gradient(160deg, #0c1116 0%, #101825 50%, #0c1116 100%);
+}
+
+.glass-panel {
+  background: rgba(15, 23, 36, 0.75);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  box-shadow: 0 30px 80px -40px rgba(58, 107, 255, 0.6);
+  backdrop-filter: blur(24px);
+}
+
+.badge {
+  @apply inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide;
+}
+
+.badge-live {
+  @apply badge bg-emerald-500/15 text-emerald-200;
+}
+
+.badge-idle {
+  @apply badge bg-sun-500/15 text-sun-200;
+}
+
+.badge-offline {
+  @apply badge bg-slate-500/20 text-slate-200;
+}

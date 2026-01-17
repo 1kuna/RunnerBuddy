@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+TAURI_BIN="$ROOT_DIR/node_modules/.bin/tauri"
+
+ensure_deps() {
+  if [[ -x "$TAURI_BIN" ]]; then
+    return 0
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "RunnerBuddy requires Node.js + npm." >&2
+    exit 1
+  fi
+  npm install
+}
+
+if [[ "${1:-}" == "--check" ]]; then
+  ensure_deps
+  echo "ok"
+  exit 0
+fi
+
+ensure_deps
+exec "$TAURI_BIN" dev
