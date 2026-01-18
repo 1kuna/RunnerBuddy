@@ -599,16 +599,43 @@ fn detect_external_service(install_path: &Path) -> Option<ExternalServiceInfo> {
         .current_dir(install_path)
         .output();
     match output {
-        Ok(output) if output.status.success() => Some(ExternalServiceInfo {
-            id: Some("svc.cmd".to_string()),
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let id = parse_windows_service_name(&stdout).unwrap_or_else(|| "svc.cmd".to_string());
+            Some(ExternalServiceInfo {
+            id: Some(id),
             path: Some(install_path.to_string_lossy().to_string()),
-        }),
+            })
+        }
         _ => None,
     }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn detect_external_service(_install_path: &Path) -> Option<ExternalServiceInfo> {
+    None
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_service_name(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        for prefix in ["service_name:", "service name:", "service:", "name:"] {
+            if !lower.starts_with(prefix) {
+                continue;
+            }
+            let value = trimmed
+                .splitn(2, ':')
+                .nth(1)
+                .unwrap_or_default()
+                .trim()
+                .trim_matches('"');
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
     None
 }
 
@@ -689,5 +716,19 @@ mod tests {
         fs::write(&plist_path, plist).expect("write plist");
         let label = parse_launchd_label_for_run_script(&plist_path, run_script);
         assert_eq!(label.as_deref(), Some("com.example.runner"));
+    }
+
+    #[test]
+    fn parses_windows_service_name() {
+        let output = "SERVICE_NAME: actions.runner.acme.repo.runner1\nSTATE              : 4  RUNNING\n";
+        assert_eq!(
+            parse_windows_service_name(output).as_deref(),
+            Some("actions.runner.acme.repo.runner1")
+        );
+        let output = "Service Name: \"actions.runner.org.repo.runner2\"\n";
+        assert_eq!(
+            parse_windows_service_name(output).as_deref(),
+            Some("actions.runner.org.repo.runner2")
+        );
     }
 }
