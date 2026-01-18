@@ -7,6 +7,7 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { relaunch } from "@tauri-apps/plugin-process";
   import { formatError } from "$lib/errors";
+  import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import {
     checkPat,
     clearPat,
@@ -121,6 +122,15 @@
   let cleanupMode = $state<"configonly" | "localdelete" | "unregisteranddelete" | null>(null);
   let cleanupConfirmInput = $state("");
 
+  let confirmDialog = $state<{
+    title?: string;
+    message: string;
+    expected?: string | null;
+    confirmText?: string;
+    cancelText?: string;
+    resolve: (confirmed: boolean) => void;
+  } | null>(null);
+
   let discoveryCandidates = $state<DiscoveryCandidate[]>([]);
   let isScanning = $state(false);
 
@@ -181,6 +191,31 @@
     return snapshot.config.runners.find((runner) => runner.runner_id === selectedRunnerId) ?? null;
   }
 
+  async function confirmAction(options: {
+    title?: string;
+    message: string;
+    expected?: string | null;
+    confirmText?: string;
+    cancelText?: string;
+  }): Promise<boolean> {
+    return new Promise((resolve) => {
+      confirmDialog = {
+        title: options.title,
+        message: options.message,
+        expected: options.expected ?? null,
+        confirmText: options.confirmText,
+        cancelText: options.cancelText,
+        resolve,
+      };
+    });
+  }
+
+  function closeConfirmDialog(confirmed: boolean) {
+    const dialog = confirmDialog;
+    confirmDialog = null;
+    dialog?.resolve(confirmed);
+  }
+
   function isRunnerIdNotFoundError(error: unknown): boolean {
     const message = formatError(error);
     return message.includes("runner error: runner ") && message.includes(" not found");
@@ -239,11 +274,6 @@
     if (!showCreate) {
       configDraftDirty = true;
     }
-  }
-
-  function requireTypedConfirm(message: string, expected: string): boolean {
-    const input = prompt(`${message}\nType \"${expected}\" to confirm.`);
-    return input === expected;
   }
 
   function scopeLabel(scope?: RunnerScope | null): string {
@@ -891,9 +921,14 @@
     if (!selectedRunnerId) return;
     const runner = selectedRunner();
     const expected = runner?.display_name || runner?.runner_name || "replace";
-    if (!requireTypedConfirm("Replace external service with RunnerBuddy?", expected)) {
-      return;
-    }
+    const confirmed = await confirmAction({
+      title: "Replace external service?",
+      message:
+        "Replace external service with RunnerBuddy?\nThis will unload/disable the existing service and install a RunnerBuddy-managed service.",
+      expected,
+      confirmText: "Replace",
+    });
+    if (!confirmed) return;
     errorMessage = null;
     isBusy = true;
     try {
@@ -948,14 +983,13 @@
     if (!selectedRunnerId) return;
     const runner = selectedRunner();
     const expected = runner?.display_name || runner?.runner_name || "rollback";
-    if (
-      !requireTypedConfirm(
-        "Rollback the move and switch back to the original install?",
-        expected
-      )
-    ) {
-      return;
-    }
+    const confirmed = await confirmAction({
+      title: "Rollback move?",
+      message: "Rollback the move and switch back to the original install?",
+      expected,
+      confirmText: "Rollback",
+    });
+    if (!confirmed) return;
     errorMessage = null;
     isBusy = true;
     try {
@@ -974,9 +1008,13 @@
     if (!selectedRunnerId) return;
     const runner = selectedRunner();
     const expected = runner?.display_name || runner?.runner_name || "delete";
-    if (!requireTypedConfirm("Delete the original runner install?", expected)) {
-      return;
-    }
+    const confirmed = await confirmAction({
+      title: "Delete original install?",
+      message: "Delete the original runner install?",
+      expected,
+      confirmText: "Delete",
+    });
+    if (!confirmed) return;
     errorMessage = null;
     isBusy = true;
     try {
@@ -993,9 +1031,14 @@
     if (!selectedRunnerId) return;
     const runner = selectedRunner();
     const expected = runner?.display_name || runner?.runner_name || "remove";
-    if (!requireTypedConfirm("Remove external service artifacts?", expected)) {
-      return;
-    }
+    const confirmed = await confirmAction({
+      title: "Remove external artifacts?",
+      message:
+        "Remove external service artifacts?\nThis will attempt to stop/unload the external service and delete its service definition file.",
+      expected,
+      confirmText: "Remove",
+    });
+    if (!confirmed) return;
     errorMessage = null;
     isBusy = true;
     try {
@@ -1031,13 +1074,12 @@
   }
 
   async function handleRerunOnboarding() {
-    if (
-      !confirm(
-        "Re-open onboarding? Existing runners are unchanged unless you choose actions."
-      )
-    ) {
-      return;
-    }
+    const confirmed = await confirmAction({
+      title: "Re-run onboarding?",
+      message: "Re-open onboarding?\nExisting runners are unchanged unless you choose actions.",
+      confirmText: "Re-run",
+    });
+    if (!confirmed) return;
     settingsError = null;
     settingsBusy = true;
     try {
@@ -1192,6 +1234,16 @@
 </script>
 
 <main class="min-h-screen px-6 py-10 text-slate-100">
+  <ConfirmDialog
+    open={!!confirmDialog}
+    title={confirmDialog?.title}
+    message={confirmDialog?.message ?? ""}
+    expected={confirmDialog?.expected}
+    confirmText={confirmDialog?.confirmText}
+    cancelText={confirmDialog?.cancelText}
+    onConfirm={() => closeConfirmDialog(true)}
+    onCancel={() => closeConfirmDialog(false)}
+  />
   <div class="mx-auto max-w-6xl space-y-8">
     <header class="flex flex-col gap-4 rounded-3xl px-8 py-8 glass-panel">
       <div class="flex flex-wrap items-center justify-between gap-4">

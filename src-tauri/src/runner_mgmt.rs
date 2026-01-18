@@ -111,7 +111,17 @@ pub async fn configure_runner(
     let config_script = runner_config_script(&install_path)?;
     let work_dir_path = expand_path(&work_dir);
     fs::create_dir_all(&work_dir_path)?;
-    let labels_csv = labels.join(",");
+    let normalized_labels = labels
+        .into_iter()
+        .map(|label| label.trim().to_string())
+        .filter(|label| !label.is_empty())
+        .collect::<Vec<_>>();
+
+    let (labels_arg, stored_labels) = if normalized_labels.is_empty() {
+        (None, crate::config::default_runner_labels())
+    } else {
+        (Some(normalized_labels.join(",")), normalized_labels)
+    };
     let url = scope.url();
     info!("Configuring runner {runner_id} for {url}");
     let mut command = Command::new(config_script);
@@ -124,11 +134,11 @@ pub async fn configure_runner(
         .arg("--token")
         .arg(&token.token)
         .arg("--name")
-        .arg(&name)
-        .arg("--labels")
-        .arg(&labels_csv)
-        .arg("--work")
-        .arg(&work_dir_path);
+        .arg(&name);
+    if let Some(labels_csv) = labels_arg.as_deref() {
+        command.arg("--labels").arg(labels_csv);
+    }
+    command.arg("--work").arg(&work_dir_path);
     let status = command.status()?;
     if !status.success() {
         return Err(Error::Runner(format!(
@@ -143,7 +153,7 @@ pub async fn configure_runner(
             .find(|runner| runner.runner_id == runner_id)
         {
             runner.runner_name = name;
-            runner.labels = labels;
+            runner.labels = stored_labels;
             runner.work_dir = work_dir;
             runner.scope = Some(scope);
         }

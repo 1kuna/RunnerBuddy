@@ -361,7 +361,11 @@ async fn runners_create_profile(
     let display_name = input
         .display_name
         .unwrap_or_else(|| runner_name.clone());
-    let labels = input.labels.unwrap_or_else(default_runner_labels);
+    let mut labels = input.labels.unwrap_or_else(default_runner_labels);
+    labels.retain(|label| !label.trim().is_empty());
+    if labels.is_empty() {
+        labels = default_runner_labels();
+    }
     let work_dir = input
         .work_dir
         .unwrap_or_else(|| default_work_dir(&runner_id).to_string_lossy().to_string());
@@ -488,15 +492,23 @@ async fn runners_delete_profile(
         unregister_runner(&profile).await.map_err(AppError::from)?;
     }
     if matches!(mode, RunnerDeleteMode::LocalDelete | RunnerDeleteMode::UnregisterAndDelete) {
+        fn remove_dir(path: &PathBuf, label: &str) {
+            match std::fs::remove_dir_all(path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => warn!("failed to remove {label} at {:?}: {err}", path),
+            }
+        }
+
         let install_path = util::expand_path(&profile.install.install_path);
         let work_dir = util::expand_path(&profile.work_dir);
         let logs_dir = crate::config::data_dir()
             .map_err(AppError::from)?
             .join("logs")
             .join(&profile.runner_id);
-        let _ = std::fs::remove_dir_all(&install_path);
-        let _ = std::fs::remove_dir_all(&work_dir);
-        let _ = std::fs::remove_dir_all(&logs_dir);
+        remove_dir(&install_path, "install path");
+        remove_dir(&work_dir, "work directory");
+        remove_dir(&logs_dir, "logs directory");
     }
 
     let runner_id_clone = runner_id.clone();
@@ -787,12 +799,24 @@ async fn runner_status(
     let profile = get_runner(&config, &runner_id).map_err(AppError::from)?;
     let (running, pid) = check_runner_process(&state, &runner_id);
 
-    let service_status = service_mgmt::status(&profile).map_err(AppError::from)?;
-    let running = running || service_status.running;
+    let service_running = match service_mgmt::status(&profile) {
+        Ok(status) => status.running,
+        Err(err) => {
+            warn!("service status check failed for {runner_id}: {err}");
+            false
+        }
+    };
+    let running = running || service_running;
 
     let status = if running {
         let log_dir = runner_mgmt::runner_log_dir(&profile);
-        runner_mgmt::classify_runner_status(&log_dir).map_err(AppError::from)?
+        match runner_mgmt::classify_runner_status(&log_dir) {
+            Ok(status) => status,
+            Err(err) => {
+                warn!("runner status classification failed for {runner_id}: {err}");
+                RunnerStatus::Idle
+            }
+        }
     } else {
         RunnerStatus::Offline
     };
@@ -822,11 +846,22 @@ async fn runner_status_all(
     for runner in config.runners.iter() {
         let runner_id = runner.runner_id.clone();
         let (running, pid) = check_runner_process(&state, &runner_id);
-        let service_status = service_mgmt::status(runner).map_err(AppError::from)?;
-        let running = running || service_status.running;
+        let service_running = match service_mgmt::status(runner) {
+            Ok(status) => status.running,
+            Err(err) => {
+                warn!("service status check failed for {runner_id}: {err}");
+                false
+            }
+        };
+        let running = running || service_running;
         let status = if running {
-            runner_mgmt::classify_runner_status(&runner_mgmt::runner_log_dir(runner))
-                .map_err(AppError::from)?
+            match runner_mgmt::classify_runner_status(&runner_mgmt::runner_log_dir(runner)) {
+                Ok(status) => status,
+                Err(err) => {
+                    warn!("runner status classification failed for {runner_id}: {err}");
+                    RunnerStatus::Idle
+                }
+            }
         } else {
             RunnerStatus::Offline
         };
@@ -945,8 +980,25 @@ async fn service_status_all(
     let config = state.config.get();
     let mut results = HashMap::new();
     for runner in config.runners.iter() {
-        let status = service_mgmt::status(runner).map_err(AppError::from)?;
-        results.insert(runner.runner_id.clone(), status);
+        match service_mgmt::status(runner) {
+            Ok(status) => {
+                results.insert(runner.runner_id.clone(), status);
+            }
+            Err(err) => {
+                warn!(
+                    "service status failed for {}: {}",
+                    runner.runner_id, err
+                );
+                results.insert(
+                    runner.runner_id.clone(),
+                    service_mgmt::ServiceStatus {
+                        installed: runner.service.installed,
+                        running: false,
+                        enabled: runner.service.run_on_boot,
+                    },
+                );
+            }
+        }
     }
     Ok(results)
 }

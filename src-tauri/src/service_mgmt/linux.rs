@@ -5,6 +5,7 @@ use crate::util::expand_path;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use tracing::warn;
 
 pub fn install(profile: &RunnerProfile) -> Result<(), Error> {
     let unit_path = unit_path(&profile.runner_id)?;
@@ -67,8 +68,21 @@ pub fn status(profile: &RunnerProfile) -> Result<ServiceStatus, Error> {
 }
 
 pub fn external_status(profile: &RunnerProfile) -> Result<ServiceStatus, Error> {
-    let unit = external_unit_name(profile)?;
     let installed = external_unit_path(profile).map(|path| path.exists()).unwrap_or(false);
+    let unit = match external_unit_name(profile) {
+        Ok(unit) => unit,
+        Err(err) => {
+            warn!(
+                "missing external systemd unit name for runner {}: {}",
+                profile.runner_id, err
+            );
+            return Ok(ServiceStatus {
+                installed,
+                running: false,
+                enabled: false,
+            });
+        }
+    };
     let running = systemctl_status(&["--user", "is-active", &unit]).unwrap_or(false);
     let enabled = systemctl_status(&["--user", "is-enabled", &unit]).unwrap_or(false);
     Ok(ServiceStatus {

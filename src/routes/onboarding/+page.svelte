@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
   import { formatError } from "$lib/errors";
+  import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import {
     completeOnboarding,
     discoverDeleteOriginalInstall,
@@ -58,6 +59,15 @@
   let lastRunnerId = $state<string | null>(null);
   let lastRunnerLabel = $state<string | null>(null);
 
+  let confirmDialog = $state<{
+    title?: string;
+    message: string;
+    expected?: string | null;
+    confirmText?: string;
+    cancelText?: string;
+    resolve: (confirmed: boolean) => void;
+  } | null>(null);
+
   onMount(() => {
     let cancelled = false;
     void (async () => {
@@ -89,9 +99,29 @@
     return scope.enterprise;
   }
 
-  function requireTypedConfirm(message: string, expected: string): boolean {
-    const input = prompt(`${message}\\nType \"${expected}\" to confirm.`);
-    return input === expected;
+  async function confirmAction(options: {
+    title?: string;
+    message: string;
+    expected?: string | null;
+    confirmText?: string;
+    cancelText?: string;
+  }): Promise<boolean> {
+    return new Promise((resolve) => {
+      confirmDialog = {
+        title: options.title,
+        message: options.message,
+        expected: options.expected ?? null,
+        confirmText: options.confirmText,
+        cancelText: options.cancelText,
+        resolve,
+      };
+    });
+  }
+
+  function closeConfirmDialog(confirmed: boolean) {
+    const dialog = confirmDialog;
+    confirmDialog = null;
+    dialog?.resolve(confirmed);
   }
 
   function initCandidateOptions(candidates: DiscoveryCandidate[]) {
@@ -221,7 +251,13 @@
 
             if (options.deleteOriginalAfterVerify) {
               const expected = candidate.runner_name ?? "delete";
-              if (!requireTypedConfirm("Delete the original runner install?", expected)) {
+              const confirmed = await confirmAction({
+                title: "Delete original install?",
+                message: "Delete the original runner install?",
+                expected,
+                confirmText: "Delete",
+              });
+              if (!confirmed) {
                 executeStates[candidate.candidate_id] = {
                   status: "needs_action",
                   detail: "Deletion skipped by user",
@@ -298,6 +334,16 @@
 </script>
 
 <main class="min-h-screen px-6 py-10 text-slate-100">
+  <ConfirmDialog
+    open={!!confirmDialog}
+    title={confirmDialog?.title}
+    message={confirmDialog?.message ?? ""}
+    expected={confirmDialog?.expected}
+    confirmText={confirmDialog?.confirmText}
+    cancelText={confirmDialog?.cancelText}
+    onConfirm={() => closeConfirmDialog(true)}
+    onCancel={() => closeConfirmDialog(false)}
+  />
   <div class="mx-auto max-w-5xl space-y-8">
     <header class="flex flex-col gap-4 rounded-3xl px-8 py-8 glass-panel">
       <p class="text-sm uppercase tracking-[0.2em] text-slate-400">RunnerBuddy onboarding</p>

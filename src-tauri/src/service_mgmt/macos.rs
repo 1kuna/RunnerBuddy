@@ -6,6 +6,7 @@ use plist::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tracing::warn;
 
 pub fn install(profile: &RunnerProfile) -> Result<(), Error> {
     let plist_path = plist_path(&profile.runner_id)?;
@@ -99,10 +100,24 @@ pub fn status(profile: &RunnerProfile) -> Result<ServiceStatus, Error> {
 }
 
 pub fn external_status(profile: &RunnerProfile) -> Result<ServiceStatus, Error> {
-    let label = external_label(profile)?;
+    let plist_path = external_plist_path(profile);
+    let installed = plist_path.as_ref().map(|path| path.exists()).unwrap_or(false);
+    let label = match external_label(profile) {
+        Ok(label) => label,
+        Err(err) => {
+            warn!(
+                "missing external launchd label for runner {}: {}",
+                profile.runner_id, err
+            );
+            return Ok(ServiceStatus {
+                installed,
+                running: false,
+                enabled: installed,
+            });
+        }
+    };
     let uid = user_uid()?;
     let scope = format!("gui/{uid}/{label}");
-    let plist_path = external_plist_path(profile);
     let output = Command::new("launchctl").arg("print").arg(&scope).output();
     match output {
         Ok(output) if output.status.success() => {
@@ -117,9 +132,9 @@ pub fn external_status(profile: &RunnerProfile) -> Result<ServiceStatus, Error> 
             })
         }
         _ => Ok(ServiceStatus {
-            installed: plist_path.as_ref().map(|path| path.exists()).unwrap_or(false),
+            installed,
             running: false,
-            enabled: plist_path.as_ref().map(|path| path.exists()).unwrap_or(false),
+            enabled: installed,
         }),
     }
 }
