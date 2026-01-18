@@ -646,14 +646,39 @@
     let cancelled = false;
 
     void (async () => {
-      await refreshState();
-      await loadSettings();
-      await refreshAllStatuses();
-      await refreshLogs();
-      appVersion = await getVersion();
+      const settingsPromise = loadSettings();
+      const versionPromise = getVersion()
+        .then((version) => {
+          appVersion = version;
+        })
+        .catch(() => {
+          appVersion = null;
+        });
+
+      try {
+        await refreshState();
+      } catch (error) {
+        errorMessage = `${error}`;
+      }
+
+      try {
+        await refreshAllStatuses();
+      } catch (error) {
+        errorMessage ??= `${error}`;
+      }
+
+      try {
+        await refreshLogs();
+      } catch (error) {
+        errorMessage ??= `${error}`;
+      }
+
+      await settingsPromise;
       if (settingsSnapshot && autoUpdatesEnabled && autoCheckOnLaunch) {
         void handleCheckUpdates({ silent: true });
       }
+
+      await versionPromise;
       if (cancelled) return;
       unlistenProgress = await listen<ProgressPayload>("progress", (event) => {
         progress = event.payload;
