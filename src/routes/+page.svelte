@@ -647,9 +647,9 @@
 
     void (async () => {
       await refreshState();
+      await loadSettings();
       await refreshAllStatuses();
       await refreshLogs();
-      await loadSettings();
       appVersion = await getVersion();
       if (settingsSnapshot && autoUpdatesEnabled && autoCheckOnLaunch) {
         void handleCheckUpdates({ silent: true });
@@ -915,7 +915,19 @@
             <p class="mt-3 text-sm text-red-200">{settingsError}</p>
           {/if}
           {#if !settingsLoaded}
-            <p class="mt-4 text-sm text-slate-400">Loading settings...</p>
+            <div class="mt-4 space-y-3 text-sm">
+              <div class="flex items-center gap-2 text-slate-400">
+                <span
+                  class="h-4 w-4 animate-spin rounded-full border-2 border-slate-500/40 border-t-tide-400/80"
+                ></span>
+                Loading settings...
+              </div>
+              <div class="space-y-3 animate-pulse">
+                <div class="h-12 rounded-xl border border-slate-500/40 bg-slate-950/30"></div>
+                <div class="h-12 rounded-xl border border-slate-500/40 bg-slate-950/30"></div>
+                <div class="h-20 rounded-xl border border-slate-500/40 bg-slate-950/30"></div>
+              </div>
+            </div>
           {:else}
             <div class="mt-4 space-y-3 text-sm">
               <label class="flex items-center justify-between rounded-xl border border-slate-500/40 px-4 py-3">
