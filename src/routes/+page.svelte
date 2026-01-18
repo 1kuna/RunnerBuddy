@@ -1249,11 +1249,21 @@
                       >
                         Adopt + replace service
                       </button>
+                      <button
+                        class="rounded-lg border border-slate-400/50 px-3 py-1 text-xs font-semibold text-slate-200"
+                        onclick={() => handleImport(candidate, { replace_service: true, move_install: true })}
+                        disabled={isBusy}
+                      >
+                        Adopt + replace + move (verify)
+                      </button>
                     {/if}
                     <button
                       class="rounded-lg border border-slate-400/50 px-3 py-1 text-xs font-semibold text-slate-200"
                       onclick={() => handleImport(candidate, { replace_service: false, move_install: true })}
-                      disabled={isBusy}
+                      disabled={isBusy || candidate.service_present}
+                      title={candidate.service_present
+                        ? "External service detected. Replace or remove the external service before moving."
+                        : ""}
                     >
                       Adopt + move (verify)
                     </button>

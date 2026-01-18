@@ -895,7 +895,10 @@ async fn discover_import(
     if options.move_install && options.verify_after_move {
         let result = verify_runner_install(&state, &profile.runner_id).await?;
         if result.ok && options.delete_original_after_verify {
-            delete_original_install(&state, &profile.runner_id)?;
+            warn!(
+                "delete_original_after_verify requested for {}; ignoring and requiring explicit deletion",
+                profile.runner_id
+            );
         }
     }
     Ok(profile.runner_id)

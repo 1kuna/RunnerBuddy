@@ -125,6 +125,11 @@ pub fn import_candidate(
     candidate: &DiscoveryCandidate,
     options: &ImportOptions,
 ) -> Result<RunnerProfile, Error> {
+    if options.move_install && candidate.service_present && !options.replace_service {
+        return Err(Error::Service(
+            "external service detected; replace or remove external service before moving".into(),
+        ));
+    }
     let runner_id = crate::config::new_runner_id();
     let config = config_store.get();
     let runner_name = candidate

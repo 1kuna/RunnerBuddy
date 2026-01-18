@@ -575,9 +575,12 @@
                         name={`strategy-${candidate.candidate_id}`}
                         class="mt-1"
                         checked={candidateOptions[candidate.candidate_id]?.strategy === "move_verify_delete"}
-                        onchange={() =>
-                          updateCandidateOption(candidate.candidate_id, { strategy: "move_verify_delete" })
-                        }
+                        onchange={() => {
+                          updateCandidateOption(candidate.candidate_id, {
+                            strategy: "move_verify_delete",
+                            ...(candidate.service_present ? { replaceService: true } : {}),
+                          });
+                        }}
                       />
                       <span>
                         <span class="font-semibold text-white">Move + verify</span>
@@ -592,18 +595,23 @@
                       <input
                         type="checkbox"
                         class="rounded border-slate-500 bg-transparent text-tide-500"
-                        checked={candidateOptions[candidate.candidate_id]?.replaceService ?? false}
+                        checked={(candidateOptions[candidate.candidate_id]?.strategy === "move_verify_delete") || (candidateOptions[candidate.candidate_id]?.replaceService ?? false)}
                         onchange={(event) =>
                           updateCandidateOption(candidate.candidate_id, {
                             replaceService: (event.target as HTMLInputElement).checked,
                           })
                         }
+                        disabled={candidateOptions[candidate.candidate_id]?.strategy === "move_verify_delete"}
                       />
                     </label>
-                    {#if !candidateOptions[candidate.candidate_id]?.replaceService}
+                    {#if candidateOptions[candidate.candidate_id]?.strategy === "move_verify_delete"}
+                      <p class="text-xs text-slate-400">
+                        Move requires replacing the external service so it can point at the new path.
+                      </p>
+                    {:else if !candidateOptions[candidate.candidate_id]?.replaceService}
                       <p class="text-xs text-amber-200">
-                        External service remains active. Deleting the original install will be blocked until the external
-                        service is removed.
+                        External service remains active. Move and delete-original operations will be blocked until the
+                        external service is replaced or removed.
                       </p>
                     {/if}
                   {/if}
