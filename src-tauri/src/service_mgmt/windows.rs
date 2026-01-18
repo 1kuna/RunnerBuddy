@@ -4,32 +4,46 @@ use crate::service_mgmt::ServiceStatus;
 use crate::util::expand_path;
 use std::process::Command;
 
-pub fn install(profile: &RunnerProfile) -> Result<(), Error> {
+fn svc_command(profile: &RunnerProfile, action: &str) -> Command {
     let install_path = expand_path(&profile.install.install_path);
-    let status = Command::new("cmd")
+    let mut command = Command::new("cmd");
+    command
         .arg("/C")
         .arg("svc.cmd")
-        .arg("install")
-        .current_dir(install_path)
-        .status()?;
+        .arg(action)
+        .current_dir(install_path);
+    command
+}
+
+fn svc_run(profile: &RunnerProfile, action: &str) -> Result<(), Error> {
+    let status = svc_command(profile, action).status()?;
     if !status.success() {
-        return Err(Error::Service("svc.cmd install failed".into()));
+        return Err(Error::Service(format!("svc.cmd {action} failed")));
     }
     Ok(())
 }
 
-pub fn uninstall(profile: &RunnerProfile) -> Result<(), Error> {
-    let install_path = expand_path(&profile.install.install_path);
-    let status = Command::new("cmd")
-        .arg("/C")
-        .arg("svc.cmd")
-        .arg("uninstall")
-        .current_dir(install_path)
-        .status()?;
-    if !status.success() {
-        return Err(Error::Service("svc.cmd uninstall failed".into()));
+fn svc_output(profile: &RunnerProfile, action: &str) -> Result<std::process::Output, Error> {
+    Ok(svc_command(profile, action).output()?)
+}
+
+fn parse_service_status(output: &std::process::Output) -> ServiceStatus {
+    let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
+    let running = stdout.contains("running");
+    let installed = output.status.success();
+    ServiceStatus {
+        installed,
+        running,
+        enabled: installed,
     }
-    Ok(())
+}
+
+pub fn install(profile: &RunnerProfile) -> Result<(), Error> {
+    svc_run(profile, "install")
+}
+
+pub fn uninstall(profile: &RunnerProfile) -> Result<(), Error> {
+    svc_run(profile, "uninstall")
 }
 
 pub fn enable_on_boot(_profile: &RunnerProfile, _enabled: bool) -> Result<(), Error> {
@@ -37,99 +51,32 @@ pub fn enable_on_boot(_profile: &RunnerProfile, _enabled: bool) -> Result<(), Er
 }
 
 pub fn start(profile: &RunnerProfile) -> Result<(), Error> {
-    let install_path = expand_path(&profile.install.install_path);
-    let status = Command::new("cmd")
-        .arg("/C")
-        .arg("svc.cmd")
-        .arg("start")
-        .current_dir(install_path)
-        .status()?;
-    if !status.success() {
-        return Err(Error::Service("svc.cmd start failed".into()));
-    }
-    Ok(())
+    svc_run(profile, "start")
 }
 
 pub fn stop(profile: &RunnerProfile) -> Result<(), Error> {
-    let install_path = expand_path(&profile.install.install_path);
-    let status = Command::new("cmd")
-        .arg("/C")
-        .arg("svc.cmd")
-        .arg("stop")
-        .current_dir(install_path)
-        .status()?;
-    if !status.success() {
-        return Err(Error::Service("svc.cmd stop failed".into()));
-    }
-    Ok(())
+    svc_run(profile, "stop")
 }
 
 pub fn status(profile: &RunnerProfile) -> Result<ServiceStatus, Error> {
     if profile.service.provider == ServiceProvider::External {
         return external_status(profile);
     }
-    let install_path = expand_path(&profile.install.install_path);
-    let output = Command::new("cmd")
-        .arg("/C")
-        .arg("svc.cmd")
-        .arg("status")
-        .current_dir(install_path)
-        .output()?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
-    let running = stdout.contains("running");
-    let installed = output.status.success();
-    Ok(ServiceStatus {
-        installed,
-        running,
-        enabled: installed,
-    })
+    let output = svc_output(profile, "status")?;
+    Ok(parse_service_status(&output))
 }
 
 pub fn external_status(profile: &RunnerProfile) -> Result<ServiceStatus, Error> {
-    let install_path = expand_path(&profile.install.install_path);
-    let output = Command::new("cmd")
-        .arg("/C")
-        .arg("svc.cmd")
-        .arg("status")
-        .current_dir(install_path)
-        .output()?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
-    let running = stdout.contains("running");
-    let installed = output.status.success();
-    Ok(ServiceStatus {
-        installed,
-        running,
-        enabled: installed,
-    })
+    let output = svc_output(profile, "status")?;
+    Ok(parse_service_status(&output))
 }
 
 pub fn external_disable(profile: &RunnerProfile) -> Result<(), Error> {
-    let install_path = expand_path(&profile.install.install_path);
-    let _ = Command::new("cmd")
-        .arg("/C")
-        .arg("svc.cmd")
-        .arg("stop")
-        .current_dir(&install_path)
-        .status();
+    let _ = svc_run(profile, "stop");
     Ok(())
 }
 
 pub fn external_remove_artifacts(profile: &RunnerProfile) -> Result<(), Error> {
-    let install_path = expand_path(&profile.install.install_path);
-    let _ = Command::new("cmd")
-        .arg("/C")
-        .arg("svc.cmd")
-        .arg("stop")
-        .current_dir(&install_path)
-        .status();
-    let status = Command::new("cmd")
-        .arg("/C")
-        .arg("svc.cmd")
-        .arg("uninstall")
-        .current_dir(&install_path)
-        .status()?;
-    if !status.success() {
-        return Err(Error::Service("svc.cmd uninstall failed".into()));
-    }
-    Ok(())
+    let _ = svc_run(profile, "stop");
+    svc_run(profile, "uninstall")
 }

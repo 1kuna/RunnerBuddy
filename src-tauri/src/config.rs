@@ -306,6 +306,15 @@ impl Config {
     }
 }
 
+pub fn find_runner(config: &Config, runner_id: &str) -> Result<RunnerProfile, Error> {
+    config
+        .runners
+        .iter()
+        .find(|runner| runner.runner_id == runner_id)
+        .cloned()
+        .ok_or_else(|| Error::Runner(format!("runner {runner_id} not found")))
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct LegacyRunnerConfig {
     pub name: String,
@@ -446,6 +455,22 @@ impl ConfigStore {
         Ok(guard.clone())
     }
 
+    pub fn update_runner<F>(&self, runner_id: &str, updater: F) -> Result<RunnerProfile, Error>
+    where
+        F: FnOnce(&mut RunnerProfile),
+    {
+        let updated = self.update(|config| {
+            if let Some(runner) = config
+                .runners
+                .iter_mut()
+                .find(|runner| runner.runner_id == runner_id)
+            {
+                updater(runner);
+            }
+        })?;
+        find_runner(&updated, runner_id)
+    }
+
     fn save_locked(&self, config: &Config) -> Result<(), Error> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
@@ -527,6 +552,14 @@ fn sanitize_selected_runner_id(config: &mut Config) -> bool {
 pub fn data_dir() -> Result<PathBuf, Error> {
     let dirs = project_dirs()?;
     Ok(dirs.data_dir().to_path_buf())
+}
+
+pub fn logs_dir() -> Result<PathBuf, Error> {
+    Ok(data_dir()?.join("logs"))
+}
+
+pub fn runner_logs_dir(runner_id: &str) -> Result<PathBuf, Error> {
+    Ok(logs_dir()?.join(runner_id))
 }
 
 pub fn managed_runners_dir() -> Result<PathBuf, Error> {

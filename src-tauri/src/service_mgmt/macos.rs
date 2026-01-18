@@ -10,9 +10,7 @@ use tracing::warn;
 
 pub fn install(profile: &RunnerProfile) -> Result<(), Error> {
     let plist_path = plist_path(&profile.runner_id)?;
-    let log_dir = crate::config::data_dir()?
-        .join("logs")
-        .join(&profile.runner_id);
+    let log_dir = crate::config::runner_logs_dir(&profile.runner_id)?;
     fs::create_dir_all(&log_dir)?;
     let plist = launchd_plist_content(profile, &log_dir);
     fs::write(&plist_path, plist)?;
@@ -31,55 +29,32 @@ pub fn uninstall(profile: &RunnerProfile) -> Result<(), Error> {
 }
 
 pub fn enable_on_boot(profile: &RunnerProfile, enabled: bool) -> Result<(), Error> {
-    let uid = user_uid()?;
     let label = label_for(&profile.runner_id);
-    let scope = format!("gui/{uid}/{label}");
-    let status = Command::new("launchctl")
-        .arg(if enabled { "enable" } else { "disable" })
-        .arg(scope)
-        .status()?;
-    if !status.success() {
-        return Err(Error::Service("launchctl enable/disable failed".into()));
-    }
-    Ok(())
+    let scope = launchctl_scope(&label)?;
+    launchctl_status(
+        &[if enabled { "enable" } else { "disable" }, &scope],
+        "enable/disable",
+    )
 }
 
 pub fn start(profile: &RunnerProfile) -> Result<(), Error> {
-    let uid = user_uid()?;
     let label = label_for(&profile.runner_id);
-    let scope = format!("gui/{uid}/{label}");
-    let status = Command::new("launchctl")
-        .arg("kickstart")
-        .arg("-k")
-        .arg(scope)
-        .status()?;
-    if !status.success() {
-        return Err(Error::Service("launchctl kickstart failed".into()));
-    }
-    Ok(())
+    let scope = launchctl_scope(&label)?;
+    launchctl_status(&["kickstart", "-k", &scope], "kickstart")
 }
 
 pub fn stop(profile: &RunnerProfile) -> Result<(), Error> {
-    let uid = user_uid()?;
     let label = label_for(&profile.runner_id);
-    let scope = format!("gui/{uid}/{label}");
-    let status = Command::new("launchctl")
-        .arg("stop")
-        .arg(scope)
-        .status()?;
-    if !status.success() {
-        return Err(Error::Service("launchctl stop failed".into()));
-    }
-    Ok(())
+    let scope = launchctl_scope(&label)?;
+    launchctl_status(&["stop", &scope], "stop")
 }
 
 pub fn status(profile: &RunnerProfile) -> Result<ServiceStatus, Error> {
     if profile.service.provider == ServiceProvider::External {
         return external_status(profile);
     }
-    let uid = user_uid()?;
     let label = label_for(&profile.runner_id);
-    let scope = format!("gui/{uid}/{label}");
+    let scope = launchctl_scope(&label)?;
     let output = Command::new("launchctl").arg("print").arg(&scope).output();
     match output {
         Ok(output) if output.status.success() => {
@@ -116,8 +91,7 @@ pub fn external_status(profile: &RunnerProfile) -> Result<ServiceStatus, Error> 
             });
         }
     };
-    let uid = user_uid()?;
-    let scope = format!("gui/{uid}/{label}");
+    let scope = launchctl_scope(&label)?;
     let output = Command::new("launchctl").arg("print").arg(&scope).output();
     match output {
         Ok(output) if output.status.success() => {
@@ -141,15 +115,8 @@ pub fn external_status(profile: &RunnerProfile) -> Result<ServiceStatus, Error> 
 
 pub fn external_disable(profile: &RunnerProfile) -> Result<(), Error> {
     let label = external_label(profile)?;
-    let uid = user_uid()?;
-    let status = Command::new("launchctl")
-        .arg("bootout")
-        .arg(format!("gui/{uid}/{label}"))
-        .status()?;
-    if !status.success() {
-        return Err(Error::Service("launchctl bootout failed".into()));
-    }
-    Ok(())
+    let scope = launchctl_scope(&label)?;
+    launchctl_status(&["bootout", &scope], "bootout")
 }
 
 pub fn external_remove_artifacts(profile: &RunnerProfile) -> Result<(), Error> {
@@ -198,6 +165,24 @@ pub fn launchd_plist_content(profile: &RunnerProfile, log_dir: &Path) -> String 
         stdout = stdout.to_string_lossy(),
         stderr = stderr.to_string_lossy(),
     )
+}
+
+fn launchctl_scope(label: &str) -> Result<String, Error> {
+    let uid = user_uid()?;
+    Ok(format!("gui/{uid}/{label}"))
+}
+
+fn launchctl_user_scope() -> Result<String, Error> {
+    let uid = user_uid()?;
+    Ok(format!("gui/{uid}"))
+}
+
+fn launchctl_status(args: &[&str], context: &str) -> Result<(), Error> {
+    let status = Command::new("launchctl").args(args).status()?;
+    if !status.success() {
+        return Err(Error::Service(format!("launchctl {context} failed")));
+    }
+    Ok(())
 }
 
 fn label_for(runner_id: &str) -> String {
@@ -251,29 +236,15 @@ fn user_uid() -> Result<String, Error> {
 }
 
 fn bootstrap(plist_path: &Path) -> Result<(), Error> {
-    let uid = user_uid()?;
-    let status = Command::new("launchctl")
-        .arg("bootstrap")
-        .arg(format!("gui/{uid}"))
-        .arg(plist_path)
-        .status()?;
-    if !status.success() {
-        return Err(Error::Service("launchctl bootstrap failed".into()));
-    }
-    Ok(())
+    let scope = launchctl_user_scope()?;
+    let plist = plist_path.to_string_lossy();
+    launchctl_status(&["bootstrap", &scope, plist.as_ref()], "bootstrap")
 }
 
 fn bootout(runner_id: &str) -> Result<(), Error> {
-    let uid = user_uid()?;
     let label = label_for(runner_id);
-    let status = Command::new("launchctl")
-        .arg("bootout")
-        .arg(format!("gui/{uid}/{label}"))
-        .status()?;
-    if !status.success() {
-        return Err(Error::Service("launchctl bootout failed".into()));
-    }
-    Ok(())
+    let scope = launchctl_scope(&label)?;
+    launchctl_status(&["bootout", &scope], "bootout")
 }
 
 #[cfg(test)]

@@ -44,6 +44,7 @@ pub struct AppState {
     pub runtime: Mutex<HashMap<String, RuntimeState>>,
     pub runner_children: Mutex<HashMap<String, Child>>,
     pub discovery_cache: Mutex<HashMap<String, DiscoveryCandidate>>,
+    pub last_seen_updates: Mutex<HashMap<String, u64>>,
     pub log_paths: LogPaths,
     _log_guard: tracing_appender::non_blocking::WorkerGuard,
 }
@@ -55,6 +56,7 @@ impl AppState {
             runtime: Mutex::new(HashMap::new()),
             runner_children: Mutex::new(HashMap::new()),
             discovery_cache: Mutex::new(HashMap::new()),
+            last_seen_updates: Mutex::new(HashMap::new()),
             log_paths: log_setup.paths,
             _log_guard: log_setup.guard,
         }

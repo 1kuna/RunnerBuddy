@@ -6,13 +6,12 @@ use crate::config::{
 use crate::errors::Error;
 use crate::runner_mgmt::latest_log_file;
 use crate::service_mgmt;
-use crate::util::default_runner_name;
+use crate::util::{default_runner_name, read_file_tail, LOG_TAIL_BYTES};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::collections::HashSet;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "windows")]
 use std::process::Command;
@@ -47,7 +46,6 @@ pub struct ImportOptions {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ServiceMigrationStrategy {
-    KeepExternal,
     ReplaceWithRunnerbuddy,
 }
 
@@ -182,30 +180,19 @@ pub fn import_candidate(
         last_seen_at: candidate.last_log_time.clone(),
     };
 
-    let updated = config_store.update(|config| {
+    config_store.update(|config| {
         config.runners.push(profile.clone());
         if config.selected_runner_id.is_none() {
             config.selected_runner_id = Some(runner_id.clone());
         }
     })?;
 
-    let mut imported = updated
-        .runners
-        .iter()
-        .find(|runner| runner.runner_id == runner_id)
-        .cloned()
-        .ok_or_else(|| Error::Config("failed to persist imported runner".into()))?;
+    let mut imported = profile;
 
     if options.replace_service && imported.service.provider == ServiceProvider::External {
         migrate_external_service(&mut imported, ServiceMigrationStrategy::ReplaceWithRunnerbuddy)?;
-        config_store.update(|config| {
-            if let Some(runner) = config
-                .runners
-                .iter_mut()
-                .find(|runner| runner.runner_id == imported.runner_id)
-            {
-                runner.service = imported.service.clone();
-            }
+        config_store.update_runner(&imported.runner_id, |runner| {
+            runner.service = imported.service.clone();
         })?;
     }
 
@@ -222,7 +209,6 @@ pub fn migrate_external_service(
     strategy: ServiceMigrationStrategy,
 ) -> Result<(), Error> {
     match strategy {
-        ServiceMigrationStrategy::KeepExternal => Ok(()),
         ServiceMigrationStrategy::ReplaceWithRunnerbuddy => {
             if profile.service.provider != ServiceProvider::External {
                 return Ok(());
@@ -263,12 +249,7 @@ pub fn move_install(
     destination: Option<String>,
 ) -> Result<RunnerProfile, Error> {
     let config = config_store.get();
-    let profile = config
-        .runners
-        .iter()
-        .find(|runner| runner.runner_id == runner_id)
-        .cloned()
-        .ok_or_else(|| Error::Runner(format!("runner {runner_id} not found")))?;
+    let profile = crate::config::find_runner(&config, runner_id)?;
     if profile.install.mode == InstallMode::Managed {
         return Err(Error::Runner("runner already managed".into()));
     }
@@ -284,25 +265,12 @@ pub fn move_install(
     copy_dir_recursive(&src_path, &dest_path)?;
     verify_copy(&src_path, &dest_path)?;
 
-    let updated = config_store.update(|config| {
-        if let Some(runner) = config
-            .runners
-            .iter_mut()
-            .find(|runner| runner.runner_id == runner_id)
-        {
-            runner.install.mode = InstallMode::Managed;
-            runner.install.install_path = dest_path.to_string_lossy().to_string();
-            runner.install.adopted_from_path = Some(src_path.to_string_lossy().to_string());
-            runner.install.migration_status = crate::config::MigrationStatus::Moved;
-        }
+    let updated_profile = config_store.update_runner(runner_id, |runner| {
+        runner.install.mode = InstallMode::Managed;
+        runner.install.install_path = dest_path.to_string_lossy().to_string();
+        runner.install.adopted_from_path = Some(src_path.to_string_lossy().to_string());
+        runner.install.migration_status = crate::config::MigrationStatus::Moved;
     })?;
-
-    let updated_profile = updated
-        .runners
-        .iter()
-        .find(|runner| runner.runner_id == runner_id)
-        .cloned()
-        .ok_or_else(|| Error::Runner("runner missing after move".into()))?;
 
     if updated_profile.service.provider == ServiceProvider::Runnerbuddy {
         service_mgmt::install(&updated_profile)?;
@@ -360,7 +328,9 @@ pub fn infer_scope_from_install(install_path: &Path) -> Option<RunnerScope> {
     }
 
     for file in candidate_metadata_files(install_path) {
-        let content = read_file_tail(&file, 1024 * 1024).unwrap_or_default();
+        let content = read_file_tail(&file, LOG_TAIL_BYTES)
+            .unwrap_or(None)
+            .unwrap_or_default();
         if let Some(scope) = scope_from_text(&content) {
             return Some(scope);
         }
@@ -368,7 +338,9 @@ pub fn infer_scope_from_install(install_path: &Path) -> Option<RunnerScope> {
 
     let log_dir = install_path.join("_diag");
     if let Ok(Some(path)) = latest_log_file(&log_dir) {
-        let content = read_file_tail(&path, 1024 * 1024).unwrap_or_default();
+        let content = read_file_tail(&path, LOG_TAIL_BYTES)
+            .unwrap_or(None)
+            .unwrap_or_default();
         if let Some(scope) = scope_from_text(&content) {
             return Some(scope);
         }
@@ -532,16 +504,6 @@ fn candidate_metadata_files(install_path: &Path) -> Vec<PathBuf> {
         .map(|name| install_path.join(name))
         .filter(|path| path.exists() && path.is_file())
         .collect()
-}
-
-fn read_file_tail(path: &Path, max_bytes: usize) -> Option<String> {
-    let mut file = fs::File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
-    let start = len.saturating_sub(max_bytes as u64);
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf).ok()?;
-    Some(String::from_utf8_lossy(&buf).to_string())
 }
 
 fn scope_from_text(text: &str) -> Option<RunnerScope> {

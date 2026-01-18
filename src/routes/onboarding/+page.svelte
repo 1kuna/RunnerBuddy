@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
+  import { closeConfirmDialog, confirmAction, confirmDialog } from "$lib/confirm";
   import { formatError } from "$lib/errors";
+  import { scopeLabel } from "$lib/format";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import {
     completeOnboarding,
@@ -14,7 +16,6 @@
     updateSettings,
     type AdoptionDefault,
     type DiscoveryCandidate,
-    type RunnerScope,
     type SettingsSnapshot
   } from "$lib/api";
 
@@ -59,15 +60,6 @@
   let lastRunnerId = $state<string | null>(null);
   let lastRunnerLabel = $state<string | null>(null);
 
-  let confirmDialog = $state<{
-    title?: string;
-    message: string;
-    expected?: string | null;
-    confirmText?: string;
-    cancelText?: string;
-    resolve: (confirmed: boolean) => void;
-  } | null>(null);
-
   onMount(() => {
     let cancelled = false;
     void (async () => {
@@ -91,38 +83,6 @@
       autoCheckOnLaunch = false;
     }
   });
-
-  function scopeLabel(scope?: RunnerScope | null): string {
-    if (!scope) return "Scope unknown";
-    if (scope.type === "repo") return `${scope.owner}/${scope.repo}`;
-    if (scope.type === "org") return scope.org;
-    return scope.enterprise;
-  }
-
-  async function confirmAction(options: {
-    title?: string;
-    message: string;
-    expected?: string | null;
-    confirmText?: string;
-    cancelText?: string;
-  }): Promise<boolean> {
-    return new Promise((resolve) => {
-      confirmDialog = {
-        title: options.title,
-        message: options.message,
-        expected: options.expected ?? null,
-        confirmText: options.confirmText,
-        cancelText: options.cancelText,
-        resolve,
-      };
-    });
-  }
-
-  function closeConfirmDialog(confirmed: boolean) {
-    const dialog = confirmDialog;
-    confirmDialog = null;
-    dialog?.resolve(confirmed);
-  }
 
   function initCandidateOptions(candidates: DiscoveryCandidate[]) {
     const next: Record<string, CandidateChoice> = {};
@@ -152,10 +112,20 @@
     return status === "needs_action" ? "needs action" : status;
   }
 
-  async function handleSaveUpdates() {
+  async function runWithError(task: () => Promise<void>) {
     errorMessage = null;
     isBusy = true;
     try {
+      await task();
+    } catch (error) {
+      errorMessage = formatError(error);
+    } finally {
+      isBusy = false;
+    }
+  }
+
+  async function handleSaveUpdates() {
+    await runWithError(async () => {
       settingsSnapshot = await updateSettings({
         auto_updates_enabled: autoUpdatesEnabled,
         auto_check_updates_on_launch: autoUpdatesEnabled ? autoCheckOnLaunch : false,
@@ -165,17 +135,11 @@
         autoCheckOnLaunch = settingsSnapshot.settings.auto_check_updates_on_launch;
       }
       step = 3;
-    } catch (error) {
-      errorMessage = formatError(error);
-    } finally {
-      isBusy = false;
-    }
+    });
   }
 
   async function handleSaveAdoptionDefault() {
-    errorMessage = null;
-    isBusy = true;
-    try {
+    await runWithError(async () => {
       settingsSnapshot = await updateSettings({
         adoption_default: adoptionDefault,
       });
@@ -185,11 +149,7 @@
         }
       }
       step = 5;
-    } catch (error) {
-      errorMessage = formatError(error);
-    } finally {
-      isBusy = false;
-    }
+    });
   }
 
   async function handleScan() {
@@ -317,30 +277,24 @@
   }
 
   async function handleFinish() {
-    errorMessage = null;
-    isBusy = true;
-    try {
+    await runWithError(async () => {
       await completeOnboarding();
       if (lastRunnerId) {
         await selectRunner(lastRunnerId);
       }
       await goto("/");
-    } catch (error) {
-      errorMessage = formatError(error);
-    } finally {
-      isBusy = false;
-    }
+    });
   }
 </script>
 
 <main class="min-h-screen px-6 py-10 text-slate-100">
   <ConfirmDialog
-    open={!!confirmDialog}
-    title={confirmDialog?.title}
-    message={confirmDialog?.message ?? ""}
-    expected={confirmDialog?.expected}
-    confirmText={confirmDialog?.confirmText}
-    cancelText={confirmDialog?.cancelText}
+    open={!!$confirmDialog}
+    title={$confirmDialog?.title}
+    message={$confirmDialog?.message ?? ""}
+    expected={$confirmDialog?.expected}
+    confirmText={$confirmDialog?.confirmText}
+    cancelText={$confirmDialog?.cancelText}
     onConfirm={() => closeConfirmDialog(true)}
     onCancel={() => closeConfirmDialog(false)}
   />

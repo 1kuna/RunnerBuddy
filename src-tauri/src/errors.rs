@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::fmt;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -34,6 +35,16 @@ impl AppError {
         Self {
             code: code.into(),
             message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for AppError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.code.is_empty() {
+            write!(f, "{}", self.message)
+        } else {
+            write!(f, "{}: {}", self.code, self.message)
         }
     }
 }

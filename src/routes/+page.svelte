@@ -6,8 +6,11 @@
   import { check } from "@tauri-apps/plugin-updater";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { relaunch } from "@tauri-apps/plugin-process";
+  import { closeConfirmDialog, confirmAction, confirmDialog } from "$lib/confirm";
   import { formatError } from "$lib/errors";
+  import { scopeLabel } from "$lib/format";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
+  import ScopePicker from "$lib/components/ScopePicker.svelte";
   import {
     checkPat,
     clearPat,
@@ -122,15 +125,6 @@
   let cleanupMode = $state<"configonly" | "localdelete" | "unregisteranddelete" | null>(null);
   let cleanupConfirmInput = $state("");
 
-  let confirmDialog = $state<{
-    title?: string;
-    message: string;
-    expected?: string | null;
-    confirmText?: string;
-    cancelText?: string;
-    resolve: (confirmed: boolean) => void;
-  } | null>(null);
-
   let discoveryCandidates = $state<DiscoveryCandidate[]>([]);
   let isScanning = $state(false);
 
@@ -158,14 +152,21 @@
     "Start runner",
   ];
 
-  function buildScope(): RunnerScope {
+  function currentScope(): RunnerScope | null {
     if (scopeType === "repo") {
-      return { type: "repo", owner: scopeOwner.trim(), repo: scopeRepo.trim() };
+      const owner = scopeOwner.trim();
+      const repo = scopeRepo.trim();
+      if (!owner || !repo) return null;
+      return { type: "repo", owner, repo };
     }
     if (scopeType === "org") {
-      return { type: "org", org: scopeOrg.trim() };
+      const org = scopeOrg.trim();
+      if (!org) return null;
+      return { type: "org", org };
     }
-    return { type: "enterprise", enterprise: scopeEnterprise.trim() };
+    const enterprise = scopeEnterprise.trim();
+    if (!enterprise) return null;
+    return { type: "enterprise", enterprise };
   }
 
   function labelsArray(): string[] {
@@ -191,34 +192,37 @@
     return snapshot.config.runners.find((runner) => runner.runner_id === selectedRunnerId) ?? null;
   }
 
-  async function confirmAction(options: {
-    title?: string;
-    message: string;
-    expected?: string | null;
-    confirmText?: string;
-    cancelText?: string;
-  }): Promise<boolean> {
-    return new Promise((resolve) => {
-      confirmDialog = {
-        title: options.title,
-        message: options.message,
-        expected: options.expected ?? null,
-        confirmText: options.confirmText,
-        cancelText: options.cancelText,
-        resolve,
-      };
-    });
-  }
-
-  function closeConfirmDialog(confirmed: boolean) {
-    const dialog = confirmDialog;
-    confirmDialog = null;
-    dialog?.resolve(confirmed);
-  }
-
   function isRunnerIdNotFoundError(error: unknown): boolean {
     const message = formatError(error);
     return message.includes("runner error: runner ") && message.includes(" not found");
+  }
+
+  async function runWithRunnerRetry(task: () => Promise<void>) {
+    try {
+      await task();
+    } catch (error) {
+      if (isRunnerIdNotFoundError(error)) {
+        try {
+          await refreshState();
+        } catch (refreshError) {
+          errorMessage ??= formatError(refreshError);
+        }
+        return;
+      }
+      errorMessage ??= formatError(error);
+    }
+  }
+
+  async function runWithError(task: () => Promise<void>) {
+    errorMessage = null;
+    isBusy = true;
+    try {
+      await task();
+    } catch (error) {
+      errorMessage = formatError(error);
+    } finally {
+      isBusy = false;
+    }
   }
 
   function resolveSelectedRunnerId(currentSnapshot: AppSnapshot | null): string | null {
@@ -276,13 +280,6 @@
     }
   }
 
-  function scopeLabel(scope?: RunnerScope | null): string {
-    if (!scope) return "Scope unknown";
-    if (scope.type === "repo") return `${scope.owner}/${scope.repo}`;
-    if (scope.type === "org") return scope.org;
-    return scope.enterprise;
-  }
-
   function migrationStatus(runner: RunnerProfile | null): string {
     if (!runner) return "none";
     return runner.install.migration_status ?? "none";
@@ -327,21 +324,11 @@
     const runner = selectedRunner();
     if (!runner) return;
     const runnerId = runner.runner_id;
-    try {
+    await runWithRunnerRetry(async () => {
       const runtime = await fetchRunnerStatus(runnerId);
       snapshot = snapshot ? { ...snapshot, runtime: { ...snapshot.runtime, [runnerId]: runtime } } : null;
       serviceStatusMap[runnerId] = await fetchServiceStatus(runnerId);
-    } catch (error) {
-      if (isRunnerIdNotFoundError(error)) {
-        try {
-          await refreshState();
-        } catch (refreshError) {
-          errorMessage ??= formatError(refreshError);
-        }
-        return;
-      }
-      errorMessage ??= formatError(error);
-    }
+    });
   }
 
   async function refreshAllStatuses() {
@@ -356,7 +343,7 @@
     const runner = selectedRunner();
     if (!runner) return;
     const runnerId = runner.runner_id;
-    try {
+    await runWithRunnerRetry(async () => {
       logSources = await listLogSources(runnerId);
       const desiredSource =
         selectedLogSource && logSources.some((source) => source.id === selectedLogSource)
@@ -368,17 +355,7 @@
       } else {
         logLines = [];
       }
-    } catch (error) {
-      if (isRunnerIdNotFoundError(error)) {
-        try {
-          await refreshState();
-        } catch (refreshError) {
-          errorMessage ??= formatError(refreshError);
-        }
-        return;
-      }
-      errorMessage ??= formatError(error);
-    }
+    });
   }
 
   function applySettingsSnapshot(snapshot: SettingsSnapshot) {
@@ -432,9 +409,7 @@
   }
 
   async function handleSavePat() {
-    errorMessage = null;
-    isBusy = true;
-    try {
+    await runWithError(async () => {
       await savePat(patAlias, patInput);
       patValid = await checkPat(patAlias);
       if (patValid) {
@@ -442,17 +417,11 @@
         patInput = "";
         wizardStep = 2;
       }
-    } catch (error) {
-      errorMessage = formatError(error);
-    } finally {
-      isBusy = false;
-    }
+    });
   }
 
   async function handleValidateSavedPat() {
-    errorMessage = null;
-    isBusy = true;
-    try {
+    await runWithError(async () => {
       patValid = await checkPat(patAlias);
       if (!patValid) {
         errorMessage = "No saved token found for this alias (or it is invalid).";
@@ -460,17 +429,11 @@
       }
       await setDefaultPatAlias(patAlias);
       wizardStep = 2;
-    } catch (error) {
-      errorMessage = formatError(error);
-    } finally {
-      isBusy = false;
-    }
+    });
   }
 
   async function handleImportGhToken() {
-    errorMessage = null;
-    isBusy = true;
-    try {
+    await runWithError(async () => {
       await importGhToken(patAlias);
       patValid = await checkPat(patAlias);
       if (!patValid) {
@@ -480,11 +443,7 @@
       await setDefaultPatAlias(patAlias);
       patInput = "";
       wizardStep = 2;
-    } catch (error) {
-      errorMessage = formatError(error);
-    } finally {
-      isBusy = false;
-    }
+    });
   }
 
   async function handleClearPat() {
@@ -494,13 +453,7 @@
   }
 
   function scopeIsComplete(): boolean {
-    if (scopeType === "repo") {
-      return !!scopeOwner.trim() && !!scopeRepo.trim();
-    }
-    if (scopeType === "org") {
-      return !!scopeOrg.trim();
-    }
-    return !!scopeEnterprise.trim();
+    return currentScope() !== null;
   }
 
   function clearScopeHelpers() {
@@ -509,15 +462,33 @@
     tokenError = null;
   }
 
+  async function loadList<T>(
+    setBusy: (value: boolean) => void,
+    setError: (value: string | null) => void,
+    setItems: (items: T[]) => void,
+    loader: () => Promise<T[]>
+  ) {
+    setError(null);
+    setBusy(true);
+    try {
+      setItems(await loader());
+    } catch (error) {
+      setError(formatError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function runnersSettingsUrl(): string | null {
-    if (!scopeIsComplete()) return null;
-    if (scopeType === "repo") {
-      return `https://github.com/${scopeOwner.trim()}/${scopeRepo.trim()}/settings/actions/runners`;
+    const scope = currentScope();
+    if (!scope) return null;
+    if (scope.type === "repo") {
+      return `https://github.com/${scope.owner}/${scope.repo}/settings/actions/runners`;
     }
-    if (scopeType === "org") {
-      return `https://github.com/organizations/${scopeOrg.trim()}/settings/actions/runners`;
+    if (scope.type === "org") {
+      return `https://github.com/organizations/${scope.org}/settings/actions/runners`;
     }
-    return `https://github.com/enterprises/${scopeEnterprise.trim()}/settings/actions/runners`;
+    return `https://github.com/enterprises/${scope.enterprise}/settings/actions/runners`;
   }
 
   async function handleOpenRunnersSettings() {
@@ -532,11 +503,12 @@
   }
 
   async function handleFetchRegistrationToken() {
-    if (!scopeIsComplete()) return;
+    const scope = currentScope();
+    if (!scope) return;
     clearScopeHelpers();
     tokenBusy = true;
     try {
-      const result = await githubGetRegistrationToken(buildScope(), patAlias);
+      const result = await githubGetRegistrationToken(scope, patAlias);
       registrationToken = result.token;
       registrationTokenExpiresAt = result.expires_at;
     } catch (error) {
@@ -575,93 +547,48 @@
   }
 
   async function handleSaveScopeForSelectedRunner() {
-    if (!selectedRunnerId) return;
-    if (!scopeIsComplete()) {
+    const runnerId = selectedRunnerId;
+    if (!runnerId) return;
+    const scope = currentScope();
+    if (!scope) {
       errorMessage = "Scope is incomplete.";
       showManualScopeRepair = true;
       return;
     }
-    errorMessage = null;
-    isBusy = true;
-    try {
-      await updateRunnerProfile(selectedRunnerId, { scope: buildScope() });
+    await runWithError(async () => {
+      await updateRunnerProfile(runnerId, { scope });
       await refreshState();
       await refreshSelectedStatus();
       showManualScopeRepair = false;
       configDraftDirty = false;
-    } catch (error) {
-      errorMessage = formatError(error);
-    } finally {
-      isBusy = false;
-    }
-  }
-
-  function repoHasAdmin(repo: GitHubRepoInfo): boolean {
-    return repo.permissions?.admin ?? false;
-  }
-
-  function filteredRepos(): GitHubRepoInfo[] {
-    const query = repoFilter.trim().toLowerCase();
-    return repoOptions.filter((repo) => {
-      if (repoAdminOnly && !repoHasAdmin(repo)) return false;
-      if (!query) return true;
-      return (
-        repo.name_with_owner.toLowerCase().includes(query) ||
-        repo.owner.toLowerCase().includes(query) ||
-        repo.repo.toLowerCase().includes(query)
-      );
     });
   }
 
   async function handleLoadRepos() {
-    reposError = null;
-    reposBusy = true;
-    try {
-      repoOptions = await githubListRepos(patAlias);
-    } catch (error) {
-      reposError = formatError(error);
-    } finally {
-      reposBusy = false;
-    }
-  }
-
-  function handleSelectRepo(repo: GitHubRepoInfo) {
-    scopeOwner = repo.owner;
-    scopeRepo = repo.repo;
-    clearScopeHelpers();
-    markConfigDirty();
-  }
-
-  function filteredOrgs(): GitHubOrgInfo[] {
-    const query = orgFilter.trim().toLowerCase();
-    return orgOptions.filter((org) => {
-      if (!query) return true;
-      return org.org.toLowerCase().includes(query);
-    });
+    await loadList(
+      (value) => (reposBusy = value),
+      (value) => (reposError = value),
+      (items) => (repoOptions = items),
+      () => githubListRepos(patAlias)
+    );
   }
 
   async function handleLoadOrgs() {
-    orgsError = null;
-    orgsBusy = true;
-    try {
-      orgOptions = await githubListOrgs(patAlias);
-    } catch (error) {
-      orgsError = formatError(error);
-    } finally {
-      orgsBusy = false;
-    }
-  }
-
-  function handleSelectOrg(org: GitHubOrgInfo) {
-    scopeOrg = org.org;
-    clearScopeHelpers();
-    markConfigDirty();
+    await loadList(
+      (value) => (orgsBusy = value),
+      (value) => (orgsError = value),
+      (items) => (orgOptions = items),
+      () => githubListOrgs(patAlias)
+    );
   }
 
   async function handleConfigure() {
-    errorMessage = null;
-    isBusy = true;
-    try {
+    await runWithError(async () => {
+      const scope = currentScope();
+      if (!scope) {
+        errorMessage = "Scope is incomplete.";
+        return;
+      }
       let runnerId = createdRunnerId;
       if (!runnerId) {
         runnerId = await createRunnerProfile({
@@ -669,7 +596,7 @@
           runner_name: runnerName.trim(),
           labels: labelsArray(),
           work_dir: workDir.trim(),
-          scope: buildScope(),
+          scope,
           pat_alias: patAlias,
         });
         createdRunnerId = runnerId;
@@ -677,7 +604,7 @@
       await downloadRunner(runnerId);
       await configureRunner({
         runnerId,
-        scope: buildScope(),
+        scope,
         name: runnerName.trim(),
         labels: labelsArray(),
         workDir: workDir.trim(),
@@ -686,47 +613,32 @@
       await handleSelectRunner(runnerId);
       wizardStep = 5;
       showCreate = false;
-    } catch (error) {
-      errorMessage = formatError(error);
-    } finally {
-      isBusy = false;
-    }
+    });
   }
 
   async function handleStart() {
-    if (!selectedRunnerId) return;
-    errorMessage = null;
-    isBusy = true;
-    try {
-      await startRunner(selectedRunnerId);
+    const runnerId = selectedRunnerId;
+    if (!runnerId) return;
+    await runWithError(async () => {
+      await startRunner(runnerId);
       await refreshSelectedStatus();
       await refreshLogs();
-    } catch (error) {
-      errorMessage = formatError(error);
-    } finally {
-      isBusy = false;
-    }
+    });
   }
 
   async function handleStop() {
-    if (!selectedRunnerId) return;
-    errorMessage = null;
-    isBusy = true;
-    try {
-      await stopRunner(selectedRunnerId);
+    const runnerId = selectedRunnerId;
+    if (!runnerId) return;
+    await runWithError(async () => {
+      await stopRunner(runnerId);
       await refreshSelectedStatus();
-    } catch (error) {
-      errorMessage = formatError(error);
-    } finally {
-      isBusy = false;
-    }
+    });
   }
 
   async function handleApplySettings() {
-    if (!selectedRunnerId) return;
-    errorMessage = null;
-    isBusy = true;
-    try {
+    const runnerId = selectedRunnerId;
+    if (!runnerId) return;
+    await runWithError(async () => {
       const runner = selectedRunner();
       if (!runner) return;
       const desiredRunnerName = runnerName.trim();
@@ -750,7 +662,7 @@
         }
         let scope = runner.scope;
         if (!scope) {
-          const repaired = await repairRunnerScope(selectedRunnerId);
+          const repaired = await repairRunnerScope(runnerId);
           scope = repaired.scope;
           await refreshState();
         }
@@ -761,7 +673,7 @@
           return;
         }
         await configureRunner({
-          runnerId: selectedRunnerId,
+          runnerId,
           scope,
           name: desiredRunnerName,
           labels: desiredLabels,
@@ -770,39 +682,30 @@
       }
 
       if (desiredDisplayName && desiredDisplayName !== runner.display_name) {
-        await updateRunnerProfile(selectedRunnerId, { display_name: desiredDisplayName });
+        await updateRunnerProfile(runnerId, { display_name: desiredDisplayName });
       }
       await refreshState();
       await refreshSelectedStatus();
       configDraftDirty = false;
-    } catch (error) {
-      errorMessage = formatError(error);
-    } finally {
-      isBusy = false;
-    }
+    });
   }
 
   async function handleRunOnBoot(enabled: boolean) {
-    if (!selectedRunnerId) return;
+    const runnerId = selectedRunnerId;
+    if (!runnerId) return;
     const runner = selectedRunner();
     if (runner?.service.provider === "external") {
       errorMessage = "Runner is managed by an external service. Replace it before enabling run on boot.";
       return;
     }
-    errorMessage = null;
-    isBusy = true;
-    try {
+    await runWithError(async () => {
       if (enabled) {
-        await installService(selectedRunnerId);
+        await installService(runnerId);
       }
-      await setRunOnBoot(selectedRunnerId, enabled);
+      await setRunOnBoot(runnerId, enabled);
       await refreshState();
       await refreshSelectedStatus();
-    } catch (error) {
-      errorMessage = formatError(error);
-    } finally {
-      isBusy = false;
-    }
+    });
   }
 
   function cleanupPrompt(mode: "configonly" | "localdelete" | "unregisteranddelete"): string {
@@ -897,9 +800,7 @@
     candidate: DiscoveryCandidate,
     options: { replace_service: boolean; move_install: boolean }
   ) {
-    errorMessage = null;
-    isBusy = true;
-    try {
+    await runWithError(async () => {
       const runnerId = await discoverImport(candidate.candidate_id, options);
       if (options.move_install) {
         const result = await discoverVerifyRunner(runnerId);
@@ -910,15 +811,12 @@
       await refreshState();
       await handleSelectRunner(runnerId);
       discoveryCandidates = discoveryCandidates.filter((item) => item.candidate_id !== candidate.candidate_id);
-    } catch (error) {
-      errorMessage = formatError(error);
-    } finally {
-      isBusy = false;
-    }
+    });
   }
 
   async function handleReplaceService() {
-    if (!selectedRunnerId) return;
+    const runnerId = selectedRunnerId;
+    if (!runnerId) return;
     const runner = selectedRunner();
     const expected = runner?.display_name || runner?.runner_name || "replace";
     const confirmed = await confirmAction({
@@ -929,58 +827,43 @@
       confirmText: "Replace",
     });
     if (!confirmed) return;
-    errorMessage = null;
-    isBusy = true;
-    try {
-      await discoverMigrateService(selectedRunnerId, "replacewithrunnerbuddy");
+    await runWithError(async () => {
+      await discoverMigrateService(runnerId, "replacewithrunnerbuddy");
       await refreshState();
       await refreshSelectedStatus();
-    } catch (error) {
-      errorMessage = formatError(error);
-    } finally {
-      isBusy = false;
-    }
+    });
   }
 
   async function handleMoveInstall() {
-    if (!selectedRunnerId) return;
-    errorMessage = null;
-    isBusy = true;
-    try {
-      await discoverMoveInstall(selectedRunnerId);
-      const result = await discoverVerifyRunner(selectedRunnerId);
+    const runnerId = selectedRunnerId;
+    if (!runnerId) return;
+    await runWithError(async () => {
+      await discoverMoveInstall(runnerId);
+      const result = await discoverVerifyRunner(runnerId);
       if (!result.ok) {
         errorMessage = result.reason ?? "Verification failed.";
       }
       await refreshState();
       await refreshSelectedStatus();
-    } catch (error) {
-      errorMessage = formatError(error);
-    } finally {
-      isBusy = false;
-    }
+    });
   }
 
   async function handleVerifyInstall() {
-    if (!selectedRunnerId) return;
-    errorMessage = null;
-    isBusy = true;
-    try {
-      const result = await discoverVerifyRunner(selectedRunnerId);
+    const runnerId = selectedRunnerId;
+    if (!runnerId) return;
+    await runWithError(async () => {
+      const result = await discoverVerifyRunner(runnerId);
       if (!result.ok) {
         errorMessage = result.reason ?? "Verification failed.";
       }
       await refreshState();
       await refreshSelectedStatus();
-    } catch (error) {
-      errorMessage = formatError(error);
-    } finally {
-      isBusy = false;
-    }
+    });
   }
 
   async function handleRollbackMove() {
-    if (!selectedRunnerId) return;
+    const runnerId = selectedRunnerId;
+    if (!runnerId) return;
     const runner = selectedRunner();
     const expected = runner?.display_name || runner?.runner_name || "rollback";
     const confirmed = await confirmAction({
@@ -990,22 +873,17 @@
       confirmText: "Rollback",
     });
     if (!confirmed) return;
-    errorMessage = null;
-    isBusy = true;
-    try {
-      await discoverRollbackMove(selectedRunnerId);
+    await runWithError(async () => {
+      await discoverRollbackMove(runnerId);
       await refreshState();
       await refreshSelectedStatus();
       await refreshLogs();
-    } catch (error) {
-      errorMessage = formatError(error);
-    } finally {
-      isBusy = false;
-    }
+    });
   }
 
   async function handleDeleteOriginalInstall() {
-    if (!selectedRunnerId) return;
+    const runnerId = selectedRunnerId;
+    if (!runnerId) return;
     const runner = selectedRunner();
     const expected = runner?.display_name || runner?.runner_name || "delete";
     const confirmed = await confirmAction({
@@ -1015,20 +893,15 @@
       confirmText: "Delete",
     });
     if (!confirmed) return;
-    errorMessage = null;
-    isBusy = true;
-    try {
-      await discoverDeleteOriginalInstall(selectedRunnerId);
+    await runWithError(async () => {
+      await discoverDeleteOriginalInstall(runnerId);
       await refreshState();
-    } catch (error) {
-      errorMessage = formatError(error);
-    } finally {
-      isBusy = false;
-    }
+    });
   }
 
   async function handleRemoveExternalArtifacts() {
-    if (!selectedRunnerId) return;
+    const runnerId = selectedRunnerId;
+    if (!runnerId) return;
     const runner = selectedRunner();
     const expected = runner?.display_name || runner?.runner_name || "remove";
     const confirmed = await confirmAction({
@@ -1039,16 +912,10 @@
       confirmText: "Remove",
     });
     if (!confirmed) return;
-    errorMessage = null;
-    isBusy = true;
-    try {
-      await discoverRemoveExternalArtifacts(selectedRunnerId);
+    await runWithError(async () => {
+      await discoverRemoveExternalArtifacts(runnerId);
       await refreshState();
-    } catch (error) {
-      errorMessage = formatError(error);
-    } finally {
-      isBusy = false;
-    }
+    });
   }
 
   async function handleAutoUpdatesToggle(enabled: boolean) {
@@ -1235,12 +1102,12 @@
 
 <main class="min-h-screen px-6 py-10 text-slate-100">
   <ConfirmDialog
-    open={!!confirmDialog}
-    title={confirmDialog?.title}
-    message={confirmDialog?.message ?? ""}
-    expected={confirmDialog?.expected}
-    confirmText={confirmDialog?.confirmText}
-    cancelText={confirmDialog?.cancelText}
+    open={!!$confirmDialog}
+    title={$confirmDialog?.title}
+    message={$confirmDialog?.message ?? ""}
+    expected={$confirmDialog?.expected}
+    confirmText={$confirmDialog?.confirmText}
+    cancelText={$confirmDialog?.cancelText}
     onConfirm={() => closeConfirmDialog(true)}
     onCancel={() => closeConfirmDialog(false)}
   />
@@ -1577,223 +1444,37 @@
                 {#if wizardStep === 2}
                   <div class="space-y-4">
                     <h3 class="text-lg font-semibold">Choose scope</h3>
-                    <div class="grid gap-3 sm:grid-cols-3">
-                      <button
-                        class={`rounded-xl border px-4 py-2 text-sm ${
-                          scopeType === "repo"
-                            ? "border-tide-400 bg-tide-500/20 text-white"
-                            : "border-slate-500/40 text-slate-200"
-                        }`}
-                        onclick={() => {
-                          scopeType = "repo";
-                          clearScopeHelpers();
-                        }}
-                      >
-                        Repo
-                      </button>
-                      <button
-                        class={`rounded-xl border px-4 py-2 text-sm ${
-                          scopeType === "org"
-                            ? "border-tide-400 bg-tide-500/20 text-white"
-                            : "border-slate-500/40 text-slate-200"
-                        }`}
-                        onclick={() => {
-                          scopeType = "org";
-                          clearScopeHelpers();
-                        }}
-                      >
-                        Org
-                      </button>
-                      <button
-                        class={`rounded-xl border px-4 py-2 text-sm ${
-                          scopeType === "enterprise"
-                            ? "border-tide-400 bg-tide-500/20 text-white"
-                            : "border-slate-500/40 text-slate-200"
-                        }`}
-                        onclick={() => {
-                          scopeType = "enterprise";
-                          clearScopeHelpers();
-                        }}
-                      >
-                        Enterprise
-                      </button>
-                    </div>
-
-                    {#if scopeType === "repo"}
-                      <div class="grid gap-3 sm:grid-cols-2">
-                        <input
-                          class="w-full rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-2 text-sm text-white"
-                          placeholder="owner"
-                          bind:value={scopeOwner}
-                        />
-                        <input
-                          class="w-full rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-2 text-sm text-white"
-                          placeholder="repo"
-                          bind:value={scopeRepo}
-                        />
-                      </div>
-
-                      <div class="rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-3">
-                        <div class="flex flex-wrap items-center justify-between gap-3">
-                          <p class="text-xs text-slate-300">Pick from your repos</p>
-                          <button
-                            class="rounded-lg border border-slate-400/40 px-3 py-1 text-xs font-semibold text-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
-                            onclick={handleLoadRepos}
-                            disabled={reposBusy || isBusy}
-                          >
-                            {reposBusy ? "Loading..." : repoOptions.length ? "Refresh" : "Load repos"}
-                          </button>
-                        </div>
-                        {#if reposError}
-                          <p class="mt-2 text-xs text-red-200">{reposError}</p>
-                        {/if}
-                        {#if repoOptions.length}
-                          {@const visibleRepos = filteredRepos()}
-                          <div class="mt-3 flex flex-wrap items-center gap-3">
-                            <input
-                              class="w-full rounded-lg border border-slate-500/40 bg-slate-950/20 px-3 py-1 text-xs text-white sm:flex-1"
-                              placeholder="Filter (owner/repo)"
-                              bind:value={repoFilter}
-                            />
-                            <label class="flex items-center gap-2 text-xs text-slate-300">
-                              <input type="checkbox" bind:checked={repoAdminOnly} />
-                              Admin only
-                            </label>
-                            <span class="text-xs text-slate-500">{visibleRepos.length} shown</span>
-                          </div>
-                          <div class="mt-3 max-h-56 overflow-auto rounded-lg border border-slate-500/40">
-                            {#each visibleRepos.slice(0, 200) as repo (repo.name_with_owner)}
-                              <button
-                                class="flex w-full items-center justify-between gap-3 border-b border-slate-500/30 px-3 py-2 text-left text-xs text-slate-100 hover:bg-slate-900/40"
-                                onclick={() => handleSelectRepo(repo)}
-                              >
-                                <span class="min-w-0 flex-1 truncate">{repo.name_with_owner}</span>
-                                <span class="shrink-0 text-slate-400">
-                                  {repo.private ? "private" : "public"}
-                                  {repoHasAdmin(repo) ? " · admin" : ""}
-                                </span>
-                              </button>
-                            {/each}
-                            {#if visibleRepos.length > 200}
-                              <p class="px-3 py-2 text-xs text-slate-500">
-                                Showing first 200 results. Refine the filter to narrow.
-                              </p>
-                            {/if}
-                            {#if visibleRepos.length === 0}
-                              <p class="px-3 py-2 text-xs text-slate-500">No matches.</p>
-                            {/if}
-                          </div>
-                        {/if}
-                      </div>
-                    {/if}
-
-                    {#if scopeType === "org"}
-                      <input
-                        class="w-full rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-2 text-sm text-white"
-                        placeholder="org name"
-                        bind:value={scopeOrg}
-                      />
-
-                      <div class="rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-3">
-                        <div class="flex flex-wrap items-center justify-between gap-3">
-                          <p class="text-xs text-slate-300">Pick from your orgs</p>
-                          <button
-                            class="rounded-lg border border-slate-400/40 px-3 py-1 text-xs font-semibold text-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
-                            onclick={handleLoadOrgs}
-                            disabled={orgsBusy || isBusy}
-                          >
-                            {orgsBusy ? "Loading..." : orgOptions.length ? "Refresh" : "Load orgs"}
-                          </button>
-                        </div>
-                        {#if orgsError}
-                          <p class="mt-2 text-xs text-red-200">{orgsError}</p>
-                        {/if}
-                        {#if orgOptions.length}
-                          {@const visibleOrgs = filteredOrgs()}
-                          <div class="mt-3 flex flex-wrap items-center gap-3">
-                            <input
-                              class="w-full rounded-lg border border-slate-500/40 bg-slate-950/20 px-3 py-1 text-xs text-white sm:flex-1"
-                              placeholder="Filter orgs"
-                              bind:value={orgFilter}
-                            />
-                            <span class="text-xs text-slate-500">{visibleOrgs.length} shown</span>
-                          </div>
-                          <div class="mt-3 max-h-56 overflow-auto rounded-lg border border-slate-500/40">
-                            {#each visibleOrgs.slice(0, 200) as org (org.org)}
-                              <button
-                                class="flex w-full items-center justify-between gap-3 border-b border-slate-500/30 px-3 py-2 text-left text-xs text-slate-100 hover:bg-slate-900/40"
-                                onclick={() => handleSelectOrg(org)}
-                              >
-                                <span class="min-w-0 flex-1 truncate">{org.org}</span>
-                                <span class="shrink-0 text-slate-400">{org.url}</span>
-                              </button>
-                            {/each}
-                            {#if visibleOrgs.length > 200}
-                              <p class="px-3 py-2 text-xs text-slate-500">
-                                Showing first 200 results. Refine the filter to narrow.
-                              </p>
-                            {/if}
-                            {#if visibleOrgs.length === 0}
-                              <p class="px-3 py-2 text-xs text-slate-500">No matches.</p>
-                            {/if}
-                          </div>
-                        {/if}
-                      </div>
-                    {/if}
-
-                    {#if scopeType === "enterprise"}
-                      <input
-                        class="w-full rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-2 text-sm text-white"
-                        placeholder="enterprise slug"
-                        bind:value={scopeEnterprise}
-                      />
-                    {/if}
-
-                    <div class="rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-3">
-                      <p class="text-xs text-slate-300">
-                        RunnerBuddy fetches runner registration tokens automatically during setup, but you can
-                        open the GitHub runners page or fetch a token manually.
-                      </p>
-                      <div class="mt-3 flex flex-wrap gap-3">
-                        <button
-                          class="rounded-lg border border-slate-400/40 px-3 py-1 text-xs font-semibold text-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
-                          onclick={handleOpenRunnersSettings}
-                          disabled={!scopeIsComplete() || isBusy}
-                        >
-                          Open self-hosted runners page
-                        </button>
-                        <button
-                          class="rounded-lg bg-tide-500 px-3 py-1 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
-                          onclick={handleFetchRegistrationToken}
-                          disabled={!scopeIsComplete() || tokenBusy || isBusy}
-                        >
-                          {tokenBusy ? "Fetching..." : "Fetch registration token"}
-                        </button>
-                      </div>
-                      {#if tokenError}
-                        <p class="mt-2 text-xs text-red-200">{tokenError}</p>
-                      {/if}
-                      {#if registrationToken}
-                        <div class="mt-3 space-y-2">
-                          <p class="text-xs text-slate-400">
-                            Token expires at {registrationTokenExpiresAt ?? "unknown"}
-                          </p>
-                          <div class="flex flex-wrap items-center gap-3">
-                            <input
-                              class="w-full flex-1 rounded-lg border border-slate-500/40 bg-slate-950/20 px-3 py-1 font-mono text-xs text-white"
-                              readonly
-                              value={registrationToken}
-                            />
-                            <button
-                              class="rounded-lg border border-slate-400/40 px-3 py-1 text-xs font-semibold text-slate-200"
-                              onclick={handleCopyRegistrationToken}
-                            >
-                              Copy
-                            </button>
-                          </div>
-                        </div>
-                      {/if}
-                    </div>
+                    <ScopePicker
+                      bind:scopeType
+                      bind:scopeOwner
+                      bind:scopeRepo
+                      bind:scopeOrg
+                      bind:scopeEnterprise
+                      bind:repoFilter
+                      bind:repoAdminOnly
+                      bind:orgFilter
+                      repoOptions={repoOptions}
+                      reposBusy={reposBusy}
+                      reposError={reposError}
+                      orgOptions={orgOptions}
+                      orgsBusy={orgsBusy}
+                      orgsError={orgsError}
+                      isBusy={isBusy}
+                      onScopeChange={clearScopeHelpers}
+                      onMarkDirty={markConfigDirty}
+                      onLoadRepos={handleLoadRepos}
+                      onLoadOrgs={handleLoadOrgs}
+                      showTokenTools
+                      scopeIsComplete={scopeIsComplete}
+                      onOpenSettings={handleOpenRunnersSettings}
+                      onFetchToken={handleFetchRegistrationToken}
+                      onCopyToken={handleCopyRegistrationToken}
+                      tokenBusy={tokenBusy}
+                      tokenError={tokenError}
+                      registrationToken={registrationToken}
+                      registrationTokenExpiresAt={registrationTokenExpiresAt}
+                      variant="wizard"
+                    />
 
                     <button
                       class="rounded-xl bg-tide-500 px-4 py-2 text-sm font-semibold text-white"
@@ -2020,14 +1701,20 @@
                   <button
                     class="rounded-xl bg-tide-500 px-4 py-2 text-sm font-semibold text-white"
                     onclick={handleStart}
-                    disabled={isBusy}
+                    disabled={isBusy || selectedRunner()?.service.provider === "external"}
+                    title={selectedRunner()?.service.provider === "external"
+                      ? "External service is managing this runner."
+                      : ""}
                   >
                     Start runner
                   </button>
                   <button
                     class="rounded-xl border border-slate-500/40 px-4 py-2 text-sm font-semibold text-slate-200"
                     onclick={handleStop}
-                    disabled={isBusy}
+                    disabled={isBusy || selectedRunner()?.service.provider === "external"}
+                    title={selectedRunner()?.service.provider === "external"
+                      ? "External service is managing this runner."
+                      : ""}
                   >
                     Stop runner
                   </button>
@@ -2172,167 +1859,28 @@
                   <p class="text-xs text-slate-300">
                     Choose the repo/org/enterprise this runner is registered to, then save it to the runner profile.
                   </p>
-                  <div class="grid gap-3 sm:grid-cols-3">
-                    <button
-                      class={`rounded-xl border px-4 py-2 text-sm ${
-                        scopeType === "repo"
-                          ? "border-tide-400 bg-tide-500/20 text-white"
-                          : "border-slate-500/40 text-slate-200"
-                      }`}
-                      onclick={() => {
-                        scopeType = "repo";
-                        clearScopeHelpers();
-                      }}
-                    >
-                      Repo
-                    </button>
-                    <button
-                      class={`rounded-xl border px-4 py-2 text-sm ${
-                        scopeType === "org"
-                          ? "border-tide-400 bg-tide-500/20 text-white"
-                          : "border-slate-500/40 text-slate-200"
-                      }`}
-                      onclick={() => {
-                        scopeType = "org";
-                        clearScopeHelpers();
-                      }}
-                    >
-                      Org
-                    </button>
-                    <button
-                      class={`rounded-xl border px-4 py-2 text-sm ${
-                        scopeType === "enterprise"
-                          ? "border-tide-400 bg-tide-500/20 text-white"
-                          : "border-slate-500/40 text-slate-200"
-                      }`}
-                      onclick={() => {
-                        scopeType = "enterprise";
-                        clearScopeHelpers();
-                      }}
-                    >
-                      Enterprise
-                    </button>
-                  </div>
-
-                  {#if scopeType === "repo"}
-                    <div class="grid gap-3 sm:grid-cols-2">
-                      <input
-                        class="w-full rounded-xl border border-slate-500/40 bg-slate-950/20 px-4 py-2 text-sm text-white"
-                        placeholder="owner"
-                        bind:value={scopeOwner}
-                      />
-                      <input
-                        class="w-full rounded-xl border border-slate-500/40 bg-slate-950/20 px-4 py-2 text-sm text-white"
-                        placeholder="repo"
-                        bind:value={scopeRepo}
-                      />
-                    </div>
-
-                    <div class="rounded-xl border border-slate-500/40 bg-slate-950/20 px-4 py-3">
-                      <div class="flex flex-wrap items-center justify-between gap-3">
-                        <p class="text-xs text-slate-300">Pick from your repos</p>
-                        <button
-                          class="rounded-lg border border-slate-400/40 px-3 py-1 text-xs font-semibold text-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
-                          onclick={handleLoadRepos}
-                          disabled={reposBusy || isBusy}
-                        >
-                          {reposBusy ? "Loading..." : repoOptions.length ? "Refresh" : "Load repos"}
-                        </button>
-                      </div>
-                      {#if reposError}
-                        <p class="mt-2 text-xs text-red-200">{reposError}</p>
-                      {/if}
-                      {#if repoOptions.length}
-                        {@const visibleRepos = filteredRepos()}
-                        <div class="mt-3 flex flex-wrap items-center gap-3">
-                          <input
-                            class="w-full rounded-lg border border-slate-500/40 bg-slate-950/10 px-3 py-1 text-xs text-white sm:flex-1"
-                            placeholder="Filter (owner/repo)"
-                            bind:value={repoFilter}
-                          />
-                          <label class="flex items-center gap-2 text-xs text-slate-300">
-                            <input type="checkbox" bind:checked={repoAdminOnly} />
-                            Admin only
-                          </label>
-                          <span class="text-xs text-slate-500">{visibleRepos.length} shown</span>
-                        </div>
-                        <div class="mt-3 max-h-48 overflow-auto rounded-lg border border-slate-500/40">
-                          {#each visibleRepos.slice(0, 200) as repo (repo.name_with_owner)}
-                            <button
-                              class="flex w-full items-center justify-between gap-3 border-b border-slate-500/30 px-3 py-2 text-left text-xs text-slate-100 hover:bg-slate-900/40"
-                              onclick={() => handleSelectRepo(repo)}
-                            >
-                              <span class="min-w-0 flex-1 truncate">{repo.name_with_owner}</span>
-                              <span class="shrink-0 text-slate-400">
-                                {repo.private ? "private" : "public"}
-                                {repoHasAdmin(repo) ? " · admin" : ""}
-                              </span>
-                            </button>
-                          {/each}
-                          {#if visibleRepos.length === 0}
-                            <p class="px-3 py-2 text-xs text-slate-500">No matches.</p>
-                          {/if}
-                        </div>
-                      {/if}
-                    </div>
-                  {/if}
-
-                  {#if scopeType === "org"}
-                    <input
-                      class="w-full rounded-xl border border-slate-500/40 bg-slate-950/20 px-4 py-2 text-sm text-white"
-                      placeholder="org name"
-                      bind:value={scopeOrg}
-                    />
-
-                    <div class="rounded-xl border border-slate-500/40 bg-slate-950/20 px-4 py-3">
-                      <div class="flex flex-wrap items-center justify-between gap-3">
-                        <p class="text-xs text-slate-300">Pick from your orgs</p>
-                        <button
-                          class="rounded-lg border border-slate-400/40 px-3 py-1 text-xs font-semibold text-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
-                          onclick={handleLoadOrgs}
-                          disabled={orgsBusy || isBusy}
-                        >
-                          {orgsBusy ? "Loading..." : orgOptions.length ? "Refresh" : "Load orgs"}
-                        </button>
-                      </div>
-                      {#if orgsError}
-                        <p class="mt-2 text-xs text-red-200">{orgsError}</p>
-                      {/if}
-                      {#if orgOptions.length}
-                        {@const visibleOrgs = filteredOrgs()}
-                        <div class="mt-3 flex flex-wrap items-center gap-3">
-                          <input
-                            class="w-full rounded-lg border border-slate-500/40 bg-slate-950/10 px-3 py-1 text-xs text-white sm:flex-1"
-                            placeholder="Filter orgs"
-                            bind:value={orgFilter}
-                          />
-                          <span class="text-xs text-slate-500">{visibleOrgs.length} shown</span>
-                        </div>
-                        <div class="mt-3 max-h-48 overflow-auto rounded-lg border border-slate-500/40">
-                          {#each visibleOrgs.slice(0, 200) as org (org.org)}
-                            <button
-                              class="flex w-full items-center justify-between gap-3 border-b border-slate-500/30 px-3 py-2 text-left text-xs text-slate-100 hover:bg-slate-900/40"
-                              onclick={() => handleSelectOrg(org)}
-                            >
-                              <span class="min-w-0 flex-1 truncate">{org.org}</span>
-                              <span class="shrink-0 text-slate-400">{org.url}</span>
-                            </button>
-                          {/each}
-                          {#if visibleOrgs.length === 0}
-                            <p class="px-3 py-2 text-xs text-slate-500">No matches.</p>
-                          {/if}
-                        </div>
-                      {/if}
-                    </div>
-                  {/if}
-
-                  {#if scopeType === "enterprise"}
-                    <input
-                      class="w-full rounded-xl border border-slate-500/40 bg-slate-950/20 px-4 py-2 text-sm text-white"
-                      placeholder="enterprise slug"
-                      bind:value={scopeEnterprise}
-                    />
-                  {/if}
+                  <ScopePicker
+                    bind:scopeType
+                    bind:scopeOwner
+                    bind:scopeRepo
+                    bind:scopeOrg
+                    bind:scopeEnterprise
+                    bind:repoFilter
+                    bind:repoAdminOnly
+                    bind:orgFilter
+                    repoOptions={repoOptions}
+                    reposBusy={reposBusy}
+                    reposError={reposError}
+                    orgOptions={orgOptions}
+                    orgsBusy={orgsBusy}
+                    orgsError={orgsError}
+                    isBusy={isBusy}
+                    onScopeChange={clearScopeHelpers}
+                    onMarkDirty={markConfigDirty}
+                    onLoadRepos={handleLoadRepos}
+                    onLoadOrgs={handleLoadOrgs}
+                    variant="compact"
+                  />
 
                   <div class="flex flex-wrap gap-3">
                     <button

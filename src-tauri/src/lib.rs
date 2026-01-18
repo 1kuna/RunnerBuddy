@@ -12,7 +12,7 @@ mod util;
 
 use crate::config::{
     default_install_path, default_runner_labels, default_work_dir, now_iso8601, AdoptionDefault,
-    Config, InstallMode, OnboardingConfig, RunnerProfile, RunnerScope, SettingsConfig,
+    InstallMode, OnboardingConfig, RunnerProfile, RunnerScope, SettingsConfig,
 };
 use crate::errors::{AppError, AppResult, Error};
 use crate::service_mgmt::ServiceStatus;
@@ -39,6 +39,8 @@ fn now_ts() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+
+const LAST_SEEN_DEBOUNCE_SECS: u64 = 60;
 
 #[derive(serde::Serialize, Clone)]
 struct RunnerStatusPayload {
@@ -67,17 +69,9 @@ struct SettingsPatch {
     adoption_default: Option<AdoptionDefault>,
 }
 
-#[derive(Debug, Deserialize)]
-struct AdoptOptions {
-    strategy: AdoptionDefault,
-    replace_service: bool,
-    #[serde(default)]
-    delete_original_after_verify: bool,
-}
-
 fn update_runtime(
     app: &AppHandle,
-    state: &State<'_, AppState>,
+    state: &AppState,
     runner_id: &str,
     status: RunnerStatus,
     pid: Option<u32>,
@@ -99,15 +93,6 @@ fn update_runtime(
     };
     let _ = app.emit("runner_status", payload);
     runtime.clone()
-}
-
-fn get_runner(config: &Config, runner_id: &str) -> Result<RunnerProfile, Error> {
-    config
-        .runners
-        .iter()
-        .find(|runner| runner.runner_id == runner_id)
-        .cloned()
-        .ok_or_else(|| Error::Runner(format!("runner {runner_id} not found")))
 }
 
 fn external_conflict_message(profile: &RunnerProfile, status: &ServiceStatus) -> Option<String> {
@@ -152,6 +137,150 @@ fn ensure_no_external_conflict(profile: &RunnerProfile) -> Result<(), AppError> 
     Ok(())
 }
 
+fn start_runner_control(
+    app: &AppHandle,
+    state: &AppState,
+    runner_id: &str,
+) -> AppResult<RuntimeState> {
+    let profile = config::find_runner(&state.config.get(), runner_id).map_err(AppError::from)?;
+    if profile.service.provider == crate::config::ServiceProvider::Runnerbuddy
+        && profile.service.installed
+    {
+        service_mgmt::start(&profile).map_err(AppError::from)?;
+        info!("Service start requested for {runner_id}");
+        return Ok(update_runtime(
+            app,
+            state,
+            runner_id,
+            RunnerStatus::Idle,
+            None,
+            None,
+        ));
+    }
+    if profile.service.provider == crate::config::ServiceProvider::External {
+        return Err(AppError::new(
+            "service",
+            "external service is managing this runner; start it externally or replace the service",
+        ));
+    }
+    let pid = runner_mgmt::start_runner(&state.config, runner_id, &state.runner_children)
+        .map_err(AppError::from)?;
+    info!("Runner {runner_id} started with pid {pid}");
+    Ok(update_runtime(
+        app,
+        state,
+        runner_id,
+        RunnerStatus::Idle,
+        Some(pid),
+        None,
+    ))
+}
+
+fn stop_runner_control(
+    app: &AppHandle,
+    state: &AppState,
+    runner_id: &str,
+) -> AppResult<RuntimeState> {
+    let profile = config::find_runner(&state.config.get(), runner_id).map_err(AppError::from)?;
+    if profile.service.provider == crate::config::ServiceProvider::Runnerbuddy
+        && profile.service.installed
+    {
+        service_mgmt::stop(&profile).map_err(AppError::from)?;
+        info!("Service stop requested for {runner_id}");
+        return Ok(update_runtime(
+            app,
+            state,
+            runner_id,
+            RunnerStatus::Offline,
+            None,
+            None,
+        ));
+    }
+    if profile.service.provider == crate::config::ServiceProvider::External {
+        return Err(AppError::new(
+            "service",
+            "external service is managing this runner; stop it externally or replace the service",
+        ));
+    }
+    runner_mgmt::stop_runner(runner_id, &state.runner_children).map_err(AppError::from)?;
+    info!("Runner {runner_id} stopped");
+    Ok(update_runtime(
+        app,
+        state,
+        runner_id,
+        RunnerStatus::Offline,
+        None,
+        None,
+    ))
+}
+
+fn update_last_seen_if_active(state: &AppState, runner_id: &str, status: RunnerStatus) {
+    if status == RunnerStatus::Offline {
+        return;
+    }
+    let now = now_ts();
+    {
+        let mut guard = state
+            .last_seen_updates
+            .lock()
+            .expect("last_seen mutex poisoned");
+        if let Some(last) = guard.get(runner_id) {
+            if now.saturating_sub(*last) < LAST_SEEN_DEBOUNCE_SECS {
+                return;
+            }
+        }
+        guard.insert(runner_id.to_string(), now);
+    }
+    let _ = state.config.update_runner(runner_id, |runner| {
+        runner.last_seen_at = Some(now_iso8601());
+    });
+}
+
+fn compute_runner_status(
+    state: &AppState,
+    runner: &RunnerProfile,
+) -> (RunnerStatus, Option<u32>) {
+    let runner_id = runner.runner_id.as_str();
+    let (running, pid) = check_runner_process(state, runner_id);
+    let service_running = match service_mgmt::status(runner) {
+        Ok(status) => status.running,
+        Err(err) => {
+            warn!("service status check failed for {runner_id}: {err}");
+            false
+        }
+    };
+    let running = running || service_running;
+    let status = if running {
+        match runner_mgmt::classify_runner_status(&runner_mgmt::runner_log_dir(runner)) {
+            Ok(status) => status,
+            Err(err) => {
+                warn!("runner status classification failed for {runner_id}: {err}");
+                RunnerStatus::Idle
+            }
+        }
+    } else {
+        RunnerStatus::Offline
+    };
+    (status, pid)
+}
+
+fn service_status_or_fallback(profile: &RunnerProfile) -> ServiceStatus {
+    match service_mgmt::status(profile) {
+        Ok(status) => status,
+        Err(err) => {
+            warn!(
+                "service status failed for {}: {}",
+                profile.runner_id, err
+            );
+            ServiceStatus {
+                installed: profile.service.installed,
+                running: false,
+                enabled: profile.service.run_on_boot,
+            }
+        }
+    }
+}
+
 fn handle_tray_menu(app: &AppHandle, menu_id: &str) {
     match menu_id {
         "open" => {
@@ -172,15 +301,10 @@ fn handle_tray_menu(app: &AppHandle, menu_id: &str) {
                         return;
                     }
                 };
-                match runner_mgmt::start_runner(&state.config, &selected, &state.runner_children) {
-                    Ok(pid) => {
-                        update_runtime(&app_handle, &state, &selected, RunnerStatus::Idle, Some(pid), None);
-                        info!("Runner {selected} started from tray");
-                    }
-                    Err(err) => {
-                        error!("Runner start from tray failed: {err}");
-                    }
-                }
+                match start_runner_control(&app_handle, &state, &selected) {
+                    Ok(_) => info!("Runner {selected} started from tray"),
+                    Err(err) => error!("Runner start from tray failed: {err}"),
+                };
             });
         }
         "stop" => {
@@ -195,12 +319,10 @@ fn handle_tray_menu(app: &AppHandle, menu_id: &str) {
                         return;
                     }
                 };
-                if let Err(err) = runner_mgmt::stop_runner(&selected, &state.runner_children) {
-                    error!("Runner stop from tray failed: {err}");
-                    return;
-                }
-                update_runtime(&app_handle, &state, &selected, RunnerStatus::Offline, None, None);
-                info!("Runner {selected} stopped from tray");
+                match stop_runner_control(&app_handle, &state, &selected) {
+                    Ok(_) => info!("Runner {selected} stopped from tray"),
+                    Err(err) => error!("Runner stop from tray failed: {err}"),
+                };
             });
         }
         "quit" => {
@@ -247,16 +369,11 @@ fn setup_tray(app: &AppHandle) -> Result<(), Error> {
 }
 
 #[tauri::command]
-async fn app_get_state(state: State<'_, AppState>) -> AppResult<AppSnapshot> {
+async fn runners_list(state: State<'_, AppState>) -> AppResult<AppSnapshot> {
     Ok(AppSnapshot {
         config: state.config.get(),
         runtime: state.runtime.lock().expect("runtime mutex poisoned").clone(),
     })
-}
-
-#[tauri::command]
-async fn runners_list(state: State<'_, AppState>) -> AppResult<AppSnapshot> {
-    app_get_state(state).await
 }
 
 #[tauri::command]
@@ -361,8 +478,7 @@ async fn runners_create_profile(
     let display_name = input
         .display_name
         .unwrap_or_else(|| runner_name.clone());
-    let mut labels = input.labels.unwrap_or_else(default_runner_labels);
-    labels.retain(|label| !label.trim().is_empty());
+    let mut labels = util::normalize_labels(input.labels.unwrap_or_default());
     if labels.is_empty() {
         labels = default_runner_labels();
     }
@@ -425,44 +541,29 @@ async fn runners_update_profile(
     runner_id: String,
     patch: RunnerProfilePatch,
 ) -> AppResult<RunnerProfile> {
-    let mut found = None;
-    let updated = state
+    state
         .config
-        .update(|config| {
-            if let Some(runner) = config
-                .runners
-                .iter_mut()
-                .find(|runner| runner.runner_id == runner_id)
-            {
-                if let Some(display_name) = patch.display_name {
-                    runner.display_name = display_name;
-                }
-                if let Some(runner_name) = patch.runner_name {
-                    runner.runner_name = runner_name;
-                }
-                if let Some(labels) = patch.labels {
-                    runner.labels = labels;
-                }
-                if let Some(work_dir) = patch.work_dir {
-                    runner.work_dir = work_dir;
-                }
-                if let Some(scope) = patch.scope {
-                    runner.scope = Some(scope);
-                }
-                if let Some(pat_alias) = patch.pat_alias {
-                    runner.pat_alias = pat_alias;
-                }
-                found = Some(runner.runner_id.clone());
+        .update_runner(&runner_id, |runner| {
+            if let Some(display_name) = patch.display_name {
+                runner.display_name = display_name;
+            }
+            if let Some(runner_name) = patch.runner_name {
+                runner.runner_name = runner_name;
+            }
+            if let Some(labels) = patch.labels {
+                runner.labels = labels;
+            }
+            if let Some(work_dir) = patch.work_dir {
+                runner.work_dir = work_dir;
+            }
+            if let Some(scope) = patch.scope {
+                runner.scope = Some(scope);
+            }
+            if let Some(pat_alias) = patch.pat_alias {
+                runner.pat_alias = pat_alias;
             }
         })
-        .map_err(AppError::from)?;
-    let runner_id = found.ok_or_else(|| AppError::new("runner", "runner not found"))?;
-    Ok(updated
-        .runners
-        .iter()
-        .find(|runner| runner.runner_id == runner_id)
-        .cloned()
-        .ok_or_else(|| AppError::new("runner", "runner missing after update"))?)
+        .map_err(AppError::from)
 }
 
 #[derive(Debug, Deserialize)]
@@ -482,7 +583,7 @@ async fn runners_delete_profile(
 ) -> AppResult<()> {
     info!("Runner delete requested for {runner_id} ({mode:?})");
     let runner_id_log = runner_id.clone();
-    let profile = get_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
+    let profile = config::find_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
     let _ = runner_mgmt::stop_runner(&runner_id, &state.runner_children);
     if profile.service.provider == crate::config::ServiceProvider::Runnerbuddy {
         let _ = service_mgmt::stop(&profile);
@@ -502,10 +603,8 @@ async fn runners_delete_profile(
 
         let install_path = util::expand_path(&profile.install.install_path);
         let work_dir = util::expand_path(&profile.work_dir);
-        let logs_dir = crate::config::data_dir()
-            .map_err(AppError::from)?
-            .join("logs")
-            .join(&profile.runner_id);
+        let logs_dir = crate::config::runner_logs_dir(&profile.runner_id)
+            .map_err(AppError::from)?;
         remove_dir(&install_path, "install path");
         remove_dir(&work_dir, "work directory");
         remove_dir(&logs_dir, "logs directory");
@@ -696,11 +795,15 @@ async fn auth_set_default_alias(state: State<'_, AppState>, alias: String) -> Ap
     Ok(())
 }
 
+fn require_pat(alias: &str) -> AppResult<String> {
+    let pat = secrets::load_pat(alias).map_err(AppError::from)?;
+    pat.ok_or_else(|| AppError::new("secrets", "PAT not found in keychain"))
+}
+
 #[tauri::command]
 async fn github_get_registration_token(scope: config::RunnerScope, alias: String) -> AppResult<github_api::RegistrationToken> {
     info!("GitHub registration token requested for {} via alias {}", scope.url(), alias);
-    let pat = secrets::load_pat(&alias).map_err(AppError::from)?;
-    let pat = pat.ok_or_else(|| AppError::new("secrets", "PAT not found in keychain"))?;
+    let pat = require_pat(&alias)?;
     let token = github_api::get_registration_token(&scope, &pat)
         .await
         .map_err(AppError::from)?;
@@ -710,8 +813,7 @@ async fn github_get_registration_token(scope: config::RunnerScope, alias: String
 #[tauri::command]
 async fn github_list_repos(alias: String) -> AppResult<Vec<github_api::RepoInfo>> {
     info!("GitHub repo list requested via alias {}", alias);
-    let pat = secrets::load_pat(&alias).map_err(AppError::from)?;
-    let pat = pat.ok_or_else(|| AppError::new("secrets", "PAT not found in keychain"))?;
+    let pat = require_pat(&alias)?;
     let repos = github_api::list_repos(&pat).await.map_err(AppError::from)?;
     info!("GitHub repo list returned {} repos for alias {}", repos.len(), alias);
     Ok(repos)
@@ -720,8 +822,7 @@ async fn github_list_repos(alias: String) -> AppResult<Vec<github_api::RepoInfo>
 #[tauri::command]
 async fn github_list_orgs(alias: String) -> AppResult<Vec<github_api::OrgInfo>> {
     info!("GitHub org list requested via alias {}", alias);
-    let pat = secrets::load_pat(&alias).map_err(AppError::from)?;
-    let pat = pat.ok_or_else(|| AppError::new("secrets", "PAT not found in keychain"))?;
+    let pat = require_pat(&alias)?;
     let orgs = github_api::list_orgs(&pat).await.map_err(AppError::from)?;
     info!("GitHub org list returned {} orgs for alias {}", orgs.len(), alias);
     Ok(orgs)
@@ -770,11 +871,7 @@ async fn runner_start(
     state: State<'_, AppState>,
     runner_id: String,
 ) -> AppResult<RuntimeState> {
-    let pid = runner_mgmt::start_runner(&state.config, &runner_id, &state.runner_children)
-        .map_err(AppError::from)?;
-    info!("Runner {runner_id} started with pid {pid}");
-    let runtime = update_runtime(&app, &state, &runner_id, RunnerStatus::Idle, Some(pid), None);
-    Ok(runtime)
+    start_runner_control(&app, &state, &runner_id)
 }
 
 #[tauri::command]
@@ -783,10 +880,7 @@ async fn runner_stop(
     state: State<'_, AppState>,
     runner_id: String,
 ) -> AppResult<RuntimeState> {
-    runner_mgmt::stop_runner(&runner_id, &state.runner_children).map_err(AppError::from)?;
-    info!("Runner {runner_id} stopped");
-    let runtime = update_runtime(&app, &state, &runner_id, RunnerStatus::Offline, None, None);
-    Ok(runtime)
+    stop_runner_control(&app, &state, &runner_id)
 }
 
 #[tauri::command]
@@ -796,43 +890,9 @@ async fn runner_status(
     runner_id: String,
 ) -> AppResult<RuntimeState> {
     let config = state.config.get();
-    let profile = get_runner(&config, &runner_id).map_err(AppError::from)?;
-    let (running, pid) = check_runner_process(&state, &runner_id);
-
-    let service_running = match service_mgmt::status(&profile) {
-        Ok(status) => status.running,
-        Err(err) => {
-            warn!("service status check failed for {runner_id}: {err}");
-            false
-        }
-    };
-    let running = running || service_running;
-
-    let status = if running {
-        let log_dir = runner_mgmt::runner_log_dir(&profile);
-        match runner_mgmt::classify_runner_status(&log_dir) {
-            Ok(status) => status,
-            Err(err) => {
-                warn!("runner status classification failed for {runner_id}: {err}");
-                RunnerStatus::Idle
-            }
-        }
-    } else {
-        RunnerStatus::Offline
-    };
-
-    if status != RunnerStatus::Offline {
-        let _ = state.config.update(|config| {
-            if let Some(runner) = config
-                .runners
-                .iter_mut()
-                .find(|runner| runner.runner_id == runner_id)
-            {
-                runner.last_seen_at = Some(now_iso8601());
-            }
-        });
-    }
-
+    let profile = config::find_runner(&config, &runner_id).map_err(AppError::from)?;
+    let (status, pid) = compute_runner_status(&state, &profile);
+    update_last_seen_if_active(&state, &runner_id, status);
     Ok(update_runtime(&app, &state, &runner_id, status, pid, None))
 }
 
@@ -845,26 +905,8 @@ async fn runner_status_all(
     let mut results = HashMap::new();
     for runner in config.runners.iter() {
         let runner_id = runner.runner_id.clone();
-        let (running, pid) = check_runner_process(&state, &runner_id);
-        let service_running = match service_mgmt::status(runner) {
-            Ok(status) => status.running,
-            Err(err) => {
-                warn!("service status check failed for {runner_id}: {err}");
-                false
-            }
-        };
-        let running = running || service_running;
-        let status = if running {
-            match runner_mgmt::classify_runner_status(&runner_mgmt::runner_log_dir(runner)) {
-                Ok(status) => status,
-                Err(err) => {
-                    warn!("runner status classification failed for {runner_id}: {err}");
-                    RunnerStatus::Idle
-                }
-            }
-        } else {
-            RunnerStatus::Offline
-        };
+        let (status, pid) = compute_runner_status(&state, runner);
+        update_last_seen_if_active(&state, &runner_id, status);
         let runtime = update_runtime(&app, &state, &runner_id, status, pid, None);
         results.insert(runner_id, runtime);
     }
@@ -876,55 +918,16 @@ async fn service_install(
     state: State<'_, AppState>,
     runner_id: String,
 ) -> AppResult<()> {
-    let profile = get_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
+    let profile = config::find_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
     ensure_no_external_conflict(&profile)?;
     service_mgmt::install(&profile).map_err(AppError::from)?;
     info!("Service installed for runner {runner_id}");
     state
         .config
-        .update(|config| {
-            if let Some(runner) = config
-                .runners
-                .iter_mut()
-                .find(|runner| runner.runner_id == runner_id)
-            {
-                runner.service.installed = true;
-                runner.service.run_on_boot = true;
-                runner.service.provider = crate::config::ServiceProvider::Runnerbuddy;
-            }
-        })
-        .map_err(AppError::from)?;
-    Ok(())
-}
-
-#[tauri::command]
-async fn service_uninstall(
-    state: State<'_, AppState>,
-    runner_id: String,
-) -> AppResult<()> {
-    let profile = get_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
-    if profile.service.provider == crate::config::ServiceProvider::External {
-        return Err(AppError::new(
-            "service",
-            "external service is managing this runner; remove external artifacts first",
-        ));
-    }
-    service_mgmt::uninstall(&profile).map_err(AppError::from)?;
-    info!("Service uninstalled for runner {runner_id}");
-    state
-        .config
-        .update(|config| {
-            if let Some(runner) = config
-                .runners
-                .iter_mut()
-                .find(|runner| runner.runner_id == runner_id)
-            {
-                runner.service.installed = false;
-                runner.service.run_on_boot = false;
-                if runner.service.provider == crate::config::ServiceProvider::Runnerbuddy {
-                    runner.service.provider = crate::config::ServiceProvider::Unknown;
-                }
-            }
+        .update_runner(&runner_id, |runner| {
+            runner.service.installed = true;
+            runner.service.run_on_boot = true;
+            runner.service.provider = crate::config::ServiceProvider::Runnerbuddy;
         })
         .map_err(AppError::from)?;
     Ok(())
@@ -936,7 +939,7 @@ async fn service_enable_on_boot(
     runner_id: String,
     enabled: bool,
 ) -> AppResult<()> {
-    let profile = get_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
+    let profile = config::find_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
     if enabled {
         ensure_no_external_conflict(&profile)?;
     }
@@ -947,17 +950,11 @@ async fn service_enable_on_boot(
     info!("Run on boot set to {enabled} for {runner_id}");
     state
         .config
-        .update(|config| {
-            if let Some(runner) = config
-                .runners
-                .iter_mut()
-                .find(|runner| runner.runner_id == runner_id)
-            {
-                runner.service.run_on_boot = enabled;
-                if enabled {
-                    runner.service.installed = true;
-                    runner.service.provider = crate::config::ServiceProvider::Runnerbuddy;
-                }
+        .update_runner(&runner_id, |runner| {
+            runner.service.run_on_boot = enabled;
+            if enabled {
+                runner.service.installed = true;
+                runner.service.provider = crate::config::ServiceProvider::Runnerbuddy;
             }
         })
         .map_err(AppError::from)?;
@@ -969,7 +966,7 @@ async fn service_status(
     state: State<'_, AppState>,
     runner_id: String,
 ) -> AppResult<service_mgmt::ServiceStatus> {
-    let profile = get_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
+    let profile = config::find_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
     service_mgmt::status(&profile).map_err(AppError::from)
 }
 
@@ -980,61 +977,10 @@ async fn service_status_all(
     let config = state.config.get();
     let mut results = HashMap::new();
     for runner in config.runners.iter() {
-        match service_mgmt::status(runner) {
-            Ok(status) => {
-                results.insert(runner.runner_id.clone(), status);
-            }
-            Err(err) => {
-                warn!(
-                    "service status failed for {}: {}",
-                    runner.runner_id, err
-                );
-                results.insert(
-                    runner.runner_id.clone(),
-                    service_mgmt::ServiceStatus {
-                        installed: runner.service.installed,
-                        running: false,
-                        enabled: runner.service.run_on_boot,
-                    },
-                );
-            }
-        }
+        let status = service_status_or_fallback(runner);
+        results.insert(runner.runner_id.clone(), status);
     }
     Ok(results)
-}
-
-#[tauri::command]
-async fn service_start(
-    state: State<'_, AppState>,
-    runner_id: String,
-) -> AppResult<()> {
-    let profile = get_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
-    if profile.service.provider == crate::config::ServiceProvider::External {
-        return Err(AppError::new(
-            "service",
-            "external service is managing this runner; start it externally",
-        ));
-    }
-    service_mgmt::start(&profile).map_err(AppError::from)?;
-    info!("Service start requested for {runner_id}");
-    Ok(())
-}
-
-#[tauri::command]
-async fn service_stop(
-    state: State<'_, AppState>,
-    runner_id: String,
-) -> AppResult<()> {
-    let profile = get_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
-    if profile.service.provider == crate::config::ServiceProvider::External {
-        return Err(AppError::new(
-            "service",
-            "external service is managing this runner; stop it externally",
-        ));
-    }
-    service_mgmt::stop(&profile).map_err(AppError::from)?;
-    info!("Service stop requested for {runner_id}");
-    Ok(())
 }
 
 #[tauri::command]
@@ -1099,39 +1045,17 @@ async fn discover_import(
 }
 
 #[tauri::command]
-async fn discover_adopt(
-    state: State<'_, AppState>,
-    candidate_id: String,
-    options: AdoptOptions,
-) -> AppResult<String> {
-    let move_install = options.strategy == AdoptionDefault::MoveVerifyDelete;
-    let import_options = discovery::ImportOptions {
-        replace_service: options.replace_service,
-        move_install,
-        verify_after_move: move_install,
-        delete_original_after_verify: move_install && options.delete_original_after_verify,
-    };
-    discover_import(state, candidate_id, import_options).await
-}
-
-#[tauri::command]
 async fn discover_migrate_service(
     state: State<'_, AppState>,
     runner_id: String,
     strategy: discovery::ServiceMigrationStrategy,
 ) -> AppResult<()> {
-    let mut profile = get_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
+    let mut profile = config::find_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
     discovery::migrate_external_service(&mut profile, strategy).map_err(AppError::from)?;
     state
         .config
-        .update(|config| {
-            if let Some(runner) = config
-                .runners
-                .iter_mut()
-                .find(|runner| runner.runner_id == runner_id)
-            {
-                runner.service = profile.service.clone();
-            }
+        .update_runner(&runner_id, |runner| {
+            runner.service = profile.service.clone();
         })
         .map_err(AppError::from)?;
     Ok(())
@@ -1142,18 +1066,12 @@ async fn discover_remove_external_artifacts(
     state: State<'_, AppState>,
     runner_id: String,
 ) -> AppResult<()> {
-    let mut profile = get_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
+    let mut profile = config::find_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
     discovery::remove_external_artifacts(&mut profile).map_err(AppError::from)?;
     state
         .config
-        .update(|config| {
-            if let Some(runner) = config
-                .runners
-                .iter_mut()
-                .find(|runner| runner.runner_id == runner_id)
-            {
-                runner.service = profile.service.clone();
-            }
+        .update_runner(&runner_id, |runner| {
+            runner.service = profile.service.clone();
         })
         .map_err(AppError::from)?;
     Ok(())
@@ -1181,7 +1099,7 @@ async fn discover_move_install(
     runner_id: String,
     destination: Option<String>,
 ) -> AppResult<RunnerProfile> {
-    let profile = get_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
+    let profile = config::find_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
     if profile.service.provider == crate::config::ServiceProvider::External {
         let status = service_mgmt::external_status(&profile).map_err(AppError::from)?;
         if status.installed || status.running {
@@ -1203,7 +1121,7 @@ async fn discover_rollback_move(
     state: State<'_, AppState>,
     runner_id: String,
 ) -> AppResult<RunnerProfile> {
-    let profile = get_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
+    let profile = config::find_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
     let original_path = validate_rollback_move(&profile)?;
     if !original_path.exists() || !discovery::looks_like_runner_install(&original_path) {
         return Err(AppError::new(
@@ -1235,23 +1153,15 @@ async fn discover_rollback_move(
     }
 
     let original_path_str = original_path.to_string_lossy().to_string();
-    let updated = state
+    let updated_profile = state
         .config
-        .update(|config| {
-            if let Some(runner) = config
-                .runners
-                .iter_mut()
-                .find(|runner| runner.runner_id == runner_id)
-            {
-                runner.install.mode = crate::config::InstallMode::Adopted;
-                runner.install.install_path = original_path_str.clone();
-                runner.install.adopted_from_path = None;
-                runner.install.migration_status = crate::config::MigrationStatus::None;
-            }
+        .update_runner(&runner_id, |runner| {
+            runner.install.mode = crate::config::InstallMode::Adopted;
+            runner.install.install_path = original_path_str.clone();
+            runner.install.adopted_from_path = None;
+            runner.install.migration_status = crate::config::MigrationStatus::None;
         })
         .map_err(AppError::from)?;
-
-    let updated_profile = get_runner(&updated, &runner_id).map_err(AppError::from)?;
     if profile.service.provider == crate::config::ServiceProvider::Runnerbuddy
         && profile.service.installed
     {
@@ -1283,7 +1193,7 @@ async fn verify_runner_install(
     state: &State<'_, AppState>,
     runner_id: &str,
 ) -> AppResult<VerifyResult> {
-    let profile = get_runner(&state.config.get(), runner_id).map_err(AppError::from)?;
+    let profile = config::find_runner(&state.config.get(), runner_id).map_err(AppError::from)?;
     if profile.service.provider == crate::config::ServiceProvider::External {
         return Err(AppError::new(
             "service",
@@ -1302,20 +1212,22 @@ async fn verify_runner_install(
     let started_via_service =
         profile.service.provider == crate::config::ServiceProvider::Runnerbuddy
             && profile.service.installed;
+    let log_dir = runner_mgmt::runner_log_dir(&profile);
+    let baseline = runner_mgmt::log_baseline(&log_dir);
     if started_via_service {
         service_mgmt::start(&profile).map_err(AppError::from)?;
     } else {
         runner_mgmt::start_runner(&state.config, runner_id, &state.runner_children)
             .map_err(AppError::from)?;
     }
-
-    let log_dir = runner_mgmt::runner_log_dir(&profile);
     let timeout = Duration::from_secs(60);
     let mut ok = false;
     let mut reason = None;
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
-        if runner_mgmt::has_ready_marker(&log_dir).map_err(AppError::from)? {
+        if runner_mgmt::has_ready_marker_since(&log_dir, baseline.as_ref())
+            .map_err(AppError::from)?
+        {
             ok = true;
             break;
         }
@@ -1337,14 +1249,8 @@ async fn verify_runner_install(
     } else {
         crate::config::MigrationStatus::Failed
     };
-    let _ = state.config.update(|config| {
-        if let Some(runner) = config
-            .runners
-            .iter_mut()
-            .find(|runner| runner.runner_id == runner_id)
-        {
-            runner.install.migration_status = status.clone();
-        }
+    let _ = state.config.update_runner(runner_id, |runner| {
+        runner.install.migration_status = status.clone();
     });
 
     Ok(VerifyResult { ok, reason })
@@ -1408,7 +1314,7 @@ fn should_delete_managed_copy(runner_id: &str, install_path: &PathBuf) -> bool {
 }
 
 fn delete_original_install(state: &State<'_, AppState>, runner_id: &str) -> AppResult<()> {
-    let profile = get_runner(&state.config.get(), runner_id).map_err(AppError::from)?;
+    let profile = config::find_runner(&state.config.get(), runner_id).map_err(AppError::from)?;
     let original_path = validate_delete_original_install(&profile)?;
     if !discovery::looks_like_runner_install(&original_path) {
         return Err(AppError::new(
@@ -1421,23 +1327,14 @@ fn delete_original_install(state: &State<'_, AppState>, runner_id: &str) -> AppR
         .map_err(AppError::from)?;
     state
         .config
-        .update(|config| {
-            if let Some(runner) = config
-                .runners
-                .iter_mut()
-                .find(|runner| runner.runner_id == runner_id)
-            {
-                runner.install.adopted_from_path = None;
-            }
+        .update_runner(runner_id, |runner| {
+            runner.install.adopted_from_path = None;
         })
         .map_err(AppError::from)?;
     Ok(())
 }
 
-fn check_runner_process(
-    state: &State<'_, AppState>,
-    runner_id: &str,
-) -> (bool, Option<u32>) {
+fn check_runner_process(state: &AppState, runner_id: &str) -> (bool, Option<u32>) {
     let mut running = false;
     let mut pid = None;
     let mut guard = state
@@ -1510,7 +1407,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            app_get_state,
             runners_list,
             settings_get,
             settings_update,
@@ -1536,17 +1432,13 @@ pub fn run() {
             runner_status,
             runner_status_all,
             service_install,
-            service_uninstall,
             service_enable_on_boot,
             service_status,
             service_status_all,
-            service_start,
-            service_stop,
             logs_list_sources,
             logs_tail,
             discover_scan,
             discover_import,
-            discover_adopt,
             discover_migrate_service,
             discover_remove_external_artifacts,
             discover_verify_runner,
@@ -1766,14 +1658,15 @@ mod tests {
         .expect("configure runner");
 
         let child_map = Mutex::new(HashMap::new());
-        runner_mgmt::start_runner(&config_store, &runner_id, &child_map).expect("start runner");
-
         let log_dir = runner_mgmt::runner_log_dir(&profile);
+        let baseline = runner_mgmt::log_baseline(&log_dir);
+        runner_mgmt::start_runner(&config_store, &runner_id, &child_map).expect("start runner");
         let timeout = Duration::from_secs(60);
         let start = std::time::Instant::now();
         let mut ready = false;
         while start.elapsed() < timeout {
-            if runner_mgmt::has_ready_marker(&log_dir).unwrap_or(false) {
+            if runner_mgmt::has_ready_marker_since(&log_dir, baseline.as_ref()).unwrap_or(false)
+            {
                 ready = true;
                 break;
             }

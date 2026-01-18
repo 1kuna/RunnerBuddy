@@ -4,7 +4,7 @@ use crate::github_api;
 use crate::logging::scrub_sensitive;
 use crate::secrets;
 use crate::discovery;
-use crate::util::expand_path;
+use crate::util::{expand_path, normalize_labels, read_file_tail, LOG_TAIL_BYTES};
 use futures_util::StreamExt;
 use sha2::Digest;
 use serde::Deserialize;
@@ -81,17 +81,10 @@ pub async fn download_runner<R: Runtime>(
     }
     fs::create_dir_all(&install_path)?;
     extract_archive(&archive_path, &install_path)?;
-    let updated = config_store.update(|config| {
-        if let Some(runner) = config
-            .runners
-            .iter_mut()
-            .find(|runner| runner.runner_id == runner_id)
-        {
-            runner.runner_version = Some(version.to_string());
-            runner.install.install_path = install_path.to_string_lossy().to_string();
-        }
-    })?;
-    Ok(find_runner_in_config(&updated, runner_id)?)
+    config_store.update_runner(runner_id, |runner| {
+        runner.runner_version = Some(version.to_string());
+        runner.install.install_path = install_path.to_string_lossy().to_string();
+    })
 }
 
 pub async fn configure_runner(
@@ -108,15 +101,10 @@ pub async fn configure_runner(
     })?;
     let token = github_api::get_registration_token(&scope, &pat).await?;
     let install_path = expand_path(&profile.install.install_path);
-    let config_script = runner_config_script(&install_path)?;
+    let config_script = runner_script_path(&install_path, RunnerScriptKind::Config)?;
     let work_dir_path = expand_path(&work_dir);
     fs::create_dir_all(&work_dir_path)?;
-    let normalized_labels = labels
-        .into_iter()
-        .map(|label| label.trim().to_string())
-        .filter(|label| !label.is_empty())
-        .collect::<Vec<_>>();
-
+    let normalized_labels = normalize_labels(labels);
     let (labels_arg, stored_labels) = if normalized_labels.is_empty() {
         (None, crate::config::default_runner_labels())
     } else {
@@ -146,26 +134,19 @@ pub async fn configure_runner(
             status
         )));
     }
-    let updated = config_store.update(|config| {
-        if let Some(runner) = config
-            .runners
-            .iter_mut()
-            .find(|runner| runner.runner_id == runner_id)
-        {
-            runner.runner_name = name;
-            runner.labels = stored_labels;
-            runner.work_dir = work_dir;
-            runner.scope = Some(scope);
-        }
-    })?;
-    Ok(find_runner_in_config(&updated, runner_id)?)
+    config_store.update_runner(runner_id, |runner| {
+        runner.runner_name = name;
+        runner.labels = stored_labels;
+        runner.work_dir = work_dir;
+        runner.scope = Some(scope.clone());
+    })
 }
 
 pub fn repair_runner_scope(
     config_store: &ConfigStore,
     runner_id: &str,
 ) -> Result<RunnerProfile, Error> {
-    let profile = get_runner_profile(config_store, runner_id)?;
+    let profile = crate::config::find_runner(&config_store.get(), runner_id)?;
     if profile.scope.is_some() {
         return Ok(profile);
     }
@@ -185,16 +166,9 @@ pub fn repair_runner_scope(
         "Repaired missing scope for runner {runner_id}: {}",
         scope.url()
     );
-    let updated = config_store.update(|config| {
-        if let Some(runner) = config
-            .runners
-            .iter_mut()
-            .find(|runner| runner.runner_id == runner_id)
-        {
-            runner.scope = Some(scope.clone());
-        }
-    })?;
-    Ok(find_runner_in_config(&updated, runner_id)?)
+    config_store.update_runner(runner_id, |runner| {
+        runner.scope = Some(scope.clone());
+    })
 }
 
 pub fn start_runner(
@@ -203,9 +177,24 @@ pub fn start_runner(
     child_map: &std::sync::Mutex<HashMap<String, Child>>,
 ) -> Result<u32, Error> {
     let profile = get_runner_profile(config_store, runner_id)?;
+    {
+        let mut guard = child_map.lock().expect("runner child mutex poisoned");
+        if let Some(child) = guard.get_mut(runner_id) {
+            match child.try_wait() {
+                Ok(None) => return Ok(child.id()),
+                Ok(Some(_)) => {
+                    guard.remove(runner_id);
+                }
+                Err(err) => {
+                    warn!("runner process check failed: {err}");
+                    guard.remove(runner_id);
+                }
+            }
+        }
+    }
     let install_path = expand_path(&profile.install.install_path);
-    let run_script = runner_run_script(&install_path)?;
-    let log_dir = crate::config::data_dir()?.join("logs").join(runner_id);
+    let run_script = runner_script_path(&install_path, RunnerScriptKind::Run)?;
+    let log_dir = crate::config::runner_logs_dir(runner_id)?;
     fs::create_dir_all(&log_dir)?;
     let stdout_path = log_dir.join("runner-stdout.log");
     let stderr_path = log_dir.join("runner-stderr.log");
@@ -277,10 +266,14 @@ fn detect_platform() -> Result<RunnerPlatform, Error> {
     Ok(RunnerPlatform { os, arch, ext })
 }
 
-async fn fetch_release(version: Option<String>) -> Result<ReleaseInfo, Error> {
-    let client = reqwest::Client::builder()
+fn http_client() -> Result<reqwest::Client, Error> {
+    Ok(reqwest::Client::builder()
         .user_agent("RunnerBuddy")
-        .build()?;
+        .build()?)
+}
+
+async fn fetch_release(version: Option<String>) -> Result<ReleaseInfo, Error> {
+    let client = http_client()?;
     let url = if let Some(version) = version {
         let version = normalize_version(&version);
         format!(
@@ -325,9 +318,7 @@ async fn download_with_progress<R: Runtime>(
     url: &str,
     dest: &Path,
 ) -> Result<(), Error> {
-    let client = reqwest::Client::builder()
-        .user_agent("RunnerBuddy")
-        .build()?;
+    let client = http_client()?;
     let resp = client.get(url).send().await?;
     if !resp.status().is_success() {
         return Err(Error::Runner(format!(
@@ -359,9 +350,7 @@ async fn download_with_progress<R: Runtime>(
 }
 
 async fn verify_sha256(url: &str, archive_path: &Path) -> Result<(), Error> {
-    let client = reqwest::Client::builder()
-        .user_agent("RunnerBuddy")
-        .build()?;
+    let client = http_client()?;
     let resp = client.get(url).send().await?;
     if !resp.status().is_success() {
         return Err(Error::Runner(format!(
@@ -418,30 +407,35 @@ fn extract_archive(archive_path: &Path, dest: &Path) -> Result<(), Error> {
     )))
 }
 
-fn runner_config_script(install_path: &Path) -> Result<PathBuf, Error> {
-    let script = if cfg!(target_os = "windows") {
-        install_path.join("config.cmd")
-    } else {
-        install_path.join("config.sh")
-    };
-    if !script.exists() {
-        return Err(Error::Runner(format!(
-            "runner config script not found at {:?}",
-            script
-        )));
-    }
-    Ok(script)
+enum RunnerScriptKind {
+    Config,
+    Run,
 }
 
-fn runner_run_script(install_path: &Path) -> Result<PathBuf, Error> {
-    let script = if cfg!(target_os = "windows") {
-        install_path.join("run.cmd")
-    } else {
-        install_path.join("run.sh")
+fn runner_script_path(install_path: &Path, kind: RunnerScriptKind) -> Result<PathBuf, Error> {
+    let script = match kind {
+        RunnerScriptKind::Config => {
+            if cfg!(target_os = "windows") {
+                install_path.join("config.cmd")
+            } else {
+                install_path.join("config.sh")
+            }
+        }
+        RunnerScriptKind::Run => {
+            if cfg!(target_os = "windows") {
+                install_path.join("run.cmd")
+            } else {
+                install_path.join("run.sh")
+            }
+        }
     };
     if !script.exists() {
+        let label = match kind {
+            RunnerScriptKind::Config => "config",
+            RunnerScriptKind::Run => "run",
+        };
         return Err(Error::Runner(format!(
-            "runner run script not found at {:?}",
+            "runner {label} script not found at {:?}",
             script
         )));
     }
@@ -461,36 +455,65 @@ pub fn classify_runner_status(log_dir: &Path) -> Result<crate::state::RunnerStat
         return Ok(crate::state::RunnerStatus::Idle);
     }
     let path = latest.unwrap();
-    let content = fs::read_to_string(&path)?;
+    let content = read_file_tail(&path, LOG_TAIL_BYTES)?.unwrap_or_default();
     let mut last_start = None;
     let mut last_end = None;
-    for line in content.lines().rev().take(2000) {
+    for (index, line) in content.lines().rev().take(2000).enumerate() {
         let line = scrub_sensitive(line);
-        if line.contains("Running job:") || line.contains("Job started") {
-            last_start = Some(line);
-            break;
+        if last_start.is_none() && (line.contains("Running job:") || line.contains("Job started")) {
+            last_start = Some(index);
         }
-    }
-    for line in content.lines().rev().take(2000) {
-        let line = scrub_sensitive(line);
-        if line.contains("Job completed") || line.contains("Job finished") {
-            last_end = Some(line);
+        if last_end.is_none() && (line.contains("Job completed") || line.contains("Job finished")) {
+            last_end = Some(index);
+        }
+        if last_start.is_some() && last_end.is_some() {
             break;
         }
     }
     match (last_start, last_end) {
+        (Some(start), Some(end)) => {
+            if start < end {
+                Ok(crate::state::RunnerStatus::Running)
+            } else {
+                Ok(crate::state::RunnerStatus::Idle)
+            }
+        }
         (Some(_), None) => Ok(crate::state::RunnerStatus::Running),
-        (Some(_), Some(_)) => Ok(crate::state::RunnerStatus::Idle),
         _ => Ok(crate::state::RunnerStatus::Idle),
     }
 }
 
-pub fn has_ready_marker(log_dir: &Path) -> Result<bool, Error> {
+pub struct LogBaseline {
+    path: PathBuf,
+    size: u64,
+}
+
+pub fn log_baseline(log_dir: &Path) -> Option<LogBaseline> {
+    let path = latest_log_file(log_dir).ok().flatten()?;
+    let size = fs::metadata(&path).ok()?.len();
+    Some(LogBaseline {
+        path,
+        size,
+    })
+}
+
+pub fn has_ready_marker_since(
+    log_dir: &Path,
+    baseline: Option<&LogBaseline>,
+) -> Result<bool, Error> {
     let latest = latest_log_file(log_dir).ok().flatten();
     let Some(path) = latest else {
         return Ok(false);
     };
-    let content = fs::read_to_string(&path)?;
+    if let Some(baseline) = baseline {
+        if baseline.path == path {
+            let size = fs::metadata(&path)?.len();
+            if size == baseline.size {
+                return Ok(false);
+            }
+        }
+    }
+    let content = read_file_tail(&path, LOG_TAIL_BYTES)?.unwrap_or_default();
     for line in content.lines().rev().take(2000) {
         let line = scrub_sensitive(line);
         if line.contains("Listening for Jobs")
@@ -506,15 +529,5 @@ pub fn has_ready_marker(log_dir: &Path) -> Result<bool, Error> {
 }
 
 fn get_runner_profile(config_store: &ConfigStore, runner_id: &str) -> Result<RunnerProfile, Error> {
-    let config = config_store.get();
-    find_runner_in_config(&config, runner_id)
-}
-
-fn find_runner_in_config(config: &crate::config::Config, runner_id: &str) -> Result<RunnerProfile, Error> {
-    config
-        .runners
-        .iter()
-        .find(|runner| runner.runner_id == runner_id)
-        .cloned()
-        .ok_or_else(|| Error::Runner(format!("runner {runner_id} not found")))
+    crate::config::find_runner(&config_store.get(), runner_id)
 }

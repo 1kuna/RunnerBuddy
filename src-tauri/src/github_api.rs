@@ -56,17 +56,7 @@ fn build_client(pat: &str) -> Result<reqwest::Client, Error> {
 pub async fn validate_pat(pat: &str) -> Result<(), Error> {
     let client = build_client(pat)?;
     let resp = client.get(format!("{API_BASE}/user")).send().await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        let summary = summarize_error_body(&body);
-        if summary.is_empty() {
-            return Err(Error::Github(format!("token validation failed: {status}")));
-        }
-        return Err(Error::Github(format!(
-            "token validation failed: {status}: {summary}"
-        )));
-    }
+    ensure_success(resp, "token validation failed").await?;
     Ok(())
 }
 
@@ -137,6 +127,22 @@ fn summarize_error_body(body: &str) -> String {
     snippet
 }
 
+async fn ensure_success(
+    resp: reqwest::Response,
+    context: &str,
+) -> Result<reqwest::Response, Error> {
+    if resp.status().is_success() {
+        return Ok(resp);
+    }
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    let summary = summarize_error_body(&body);
+    if summary.is_empty() {
+        return Err(Error::Github(format!("{context}: {status}")));
+    }
+    Err(Error::Github(format!("{context}: {status}: {summary}")))
+}
+
 async fn fetch_all_pages<T>(client: &reqwest::Client, mut url: String) -> Result<Vec<T>, Error>
 where
     T: DeserializeOwned,
@@ -149,15 +155,7 @@ where
             return Err(Error::Github("pagination exceeded 200 pages".into()));
         }
         let resp = client.get(&url).send().await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            let summary = summarize_error_body(&body);
-            if summary.is_empty() {
-                return Err(Error::Github(format!("request failed: {status}")));
-            }
-            return Err(Error::Github(format!("request failed: {status}: {summary}")));
-        }
+        let resp = ensure_success(resp, "request failed").await?;
         let next_link = resp
             .headers()
             .get(LINK)
@@ -210,19 +208,7 @@ pub async fn get_registration_token(scope: &RunnerScope, pat: &str) -> Result<Re
         .post(format!("{API_BASE}{endpoint}"))
         .send()
         .await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        let summary = summarize_error_body(&body);
-        if summary.is_empty() {
-            return Err(Error::Github(format!(
-                "registration token request failed: {status}"
-            )));
-        }
-        return Err(Error::Github(format!(
-            "registration token request failed: {status}: {summary}"
-        )));
-    }
+    let resp = ensure_success(resp, "registration token request failed").await?;
     let token = resp.json::<RegistrationToken>().await?;
     Ok(token)
 }
@@ -234,17 +220,7 @@ pub async fn get_remove_token(scope: &RunnerScope, pat: &str) -> Result<Registra
         .post(format!("{API_BASE}{endpoint}"))
         .send()
         .await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        let summary = summarize_error_body(&body);
-        if summary.is_empty() {
-            return Err(Error::Github(format!("remove token request failed: {status}")));
-        }
-        return Err(Error::Github(format!(
-            "remove token request failed: {status}: {summary}"
-        )));
-    }
+    let resp = ensure_success(resp, "remove token request failed").await?;
     let token = resp.json::<RegistrationToken>().await?;
     Ok(token)
 }

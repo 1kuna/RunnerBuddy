@@ -148,46 +148,35 @@ export interface DiscoveryCandidate {
 
 export type RunnerDeleteMode = "configonly" | "localdelete" | "unregisteranddelete";
 
-export type ServiceMigrationStrategy = "keepexternal" | "replacewithrunnerbuddy";
+export type ServiceMigrationStrategy = "replacewithrunnerbuddy";
 
-export async function getState(): Promise<AppSnapshot> {
-  return invoke("app_get_state");
-}
+const call = <T>(command: string, args?: Record<string, unknown>): Promise<T> =>
+  invoke<T>(command, args);
 
-export async function runnersList(): Promise<AppSnapshot> {
-  return invoke("runners_list");
-}
+export const runnersList = (): Promise<AppSnapshot> => call("runners_list");
 
-export async function getSettings(): Promise<SettingsSnapshot> {
-  return invoke("settings_get");
-}
+export const getSettings = (): Promise<SettingsSnapshot> => call("settings_get");
 
-export async function updateSettings(
+export const updateSettings = (
   patch: Partial<SettingsConfig>
-): Promise<SettingsSnapshot> {
-  return invoke("settings_update", { patch });
-}
+): Promise<SettingsSnapshot> => call("settings_update", { patch });
 
-export async function completeOnboarding(): Promise<SettingsSnapshot> {
-  return invoke("onboarding_complete");
-}
+export const completeOnboarding = (): Promise<SettingsSnapshot> =>
+  call("onboarding_complete");
 
-export async function resetOnboarding(): Promise<SettingsSnapshot> {
-  return invoke("onboarding_reset");
-}
+export const resetOnboarding = (): Promise<SettingsSnapshot> =>
+  call("onboarding_reset");
 
-export async function createRunnerProfile(params: {
+export const createRunnerProfile = (params: {
   display_name?: string;
   runner_name?: string;
   labels?: string[];
   work_dir?: string;
   scope?: RunnerScope | null;
   pat_alias?: string;
-}): Promise<string> {
-  return invoke("runners_create_profile", { input: params });
-}
+}): Promise<string> => call("runners_create_profile", { input: params });
 
-export async function updateRunnerProfile(
+export const updateRunnerProfile = (
   runnerId: string,
   patch: {
     display_name?: string;
@@ -197,192 +186,131 @@ export async function updateRunnerProfile(
     scope?: RunnerScope | null;
     pat_alias?: string;
   }
-): Promise<RunnerProfile> {
-  return invoke("runners_update_profile", { runnerId, patch });
-}
+): Promise<RunnerProfile> => call("runners_update_profile", { runnerId, patch });
 
-export async function deleteRunnerProfile(
+export const deleteRunnerProfile = (
   runnerId: string,
   mode: RunnerDeleteMode
-): Promise<void> {
-  return invoke("runners_delete_profile", { runnerId, mode });
-}
+): Promise<void> => call("runners_delete_profile", { runnerId, mode });
 
-export async function selectRunner(runnerId: string | null): Promise<void> {
-  return invoke("runners_select", { runnerId });
-}
+export const selectRunner = (runnerId: string | null): Promise<void> =>
+  call("runners_select", { runnerId });
 
-export async function savePat(alias: string, pat: string): Promise<void> {
-  return invoke("auth_save_pat", { alias, pat });
-}
+export const savePat = (alias: string, pat: string): Promise<void> =>
+  call("auth_save_pat", { alias, pat });
 
-export async function importGhToken(alias: string): Promise<void> {
-  return invoke("auth_import_gh_token", { alias });
-}
+export const importGhToken = (alias: string): Promise<void> =>
+  call("auth_import_gh_token", { alias });
 
-export async function clearPat(alias: string): Promise<void> {
-  return invoke("auth_clear_pat", { alias });
-}
+export const clearPat = (alias: string): Promise<void> =>
+  call("auth_clear_pat", { alias });
 
-export async function checkPat(alias: string): Promise<boolean> {
-  return invoke("auth_check_pat", { alias });
-}
+export const checkPat = (alias: string): Promise<boolean> =>
+  call("auth_check_pat", { alias });
 
-export async function setDefaultPatAlias(alias: string): Promise<void> {
-  return invoke("auth_set_default_alias", { alias });
-}
+export const setDefaultPatAlias = (alias: string): Promise<void> =>
+  call("auth_set_default_alias", { alias });
 
-export async function githubGetRegistrationToken(
+export const githubGetRegistrationToken = (
   scope: RunnerScope,
   alias: string
-): Promise<GitHubRegistrationToken> {
-  return invoke("github_get_registration_token", { scope, alias });
-}
+): Promise<GitHubRegistrationToken> =>
+  call("github_get_registration_token", { scope, alias });
 
-export async function githubListRepos(alias: string): Promise<GitHubRepoInfo[]> {
-  return invoke("github_list_repos", { alias });
-}
+export const githubListRepos = (alias: string): Promise<GitHubRepoInfo[]> =>
+  call("github_list_repos", { alias });
 
-export async function githubListOrgs(alias: string): Promise<GitHubOrgInfo[]> {
-  return invoke("github_list_orgs", { alias });
-}
+export const githubListOrgs = (alias: string): Promise<GitHubOrgInfo[]> =>
+  call("github_list_orgs", { alias });
 
-export async function repairRunnerScope(runnerId: string): Promise<RunnerProfile> {
-  return invoke("runner_repair_scope", { runnerId });
-}
+export const repairRunnerScope = (runnerId: string): Promise<RunnerProfile> =>
+  call("runner_repair_scope", { runnerId });
 
-export async function downloadRunner(
+export const downloadRunner = (
   runnerId: string,
   version?: string
-): Promise<RunnerProfile> {
-  return invoke("runner_download", { runnerId, version });
-}
+): Promise<RunnerProfile> => call("runner_download", { runnerId, version });
 
-export async function configureRunner(params: {
+export const configureRunner = (params: {
   runnerId: string;
   scope: RunnerScope;
   name: string;
   labels: string[];
   workDir: string;
-}): Promise<RunnerProfile> {
-  return invoke("runner_configure", {
+}): Promise<RunnerProfile> =>
+  call("runner_configure", {
     runnerId: params.runnerId,
     scope: params.scope,
     name: params.name,
     labels: params.labels,
     workDir: params.workDir,
   });
-}
 
-export async function startRunner(runnerId: string): Promise<RuntimeState> {
-  return invoke("runner_start", { runnerId });
-}
+export const startRunner = (runnerId: string): Promise<RuntimeState> =>
+  call("runner_start", { runnerId });
 
-export async function stopRunner(runnerId: string): Promise<RuntimeState> {
-  return invoke("runner_stop", { runnerId });
-}
+export const stopRunner = (runnerId: string): Promise<RuntimeState> =>
+  call("runner_stop", { runnerId });
 
-export async function fetchRunnerStatus(runnerId: string): Promise<RuntimeState> {
-  return invoke("runner_status", { runnerId });
-}
+export const fetchRunnerStatus = (runnerId: string): Promise<RuntimeState> =>
+  call("runner_status", { runnerId });
 
-export async function fetchRunnerStatusAll(): Promise<Record<string, RuntimeState>> {
-  return invoke("runner_status_all");
-}
+export const fetchRunnerStatusAll = (): Promise<Record<string, RuntimeState>> =>
+  call("runner_status_all");
 
-export async function installService(runnerId: string): Promise<void> {
-  return invoke("service_install", { runnerId });
-}
+export const installService = (runnerId: string): Promise<void> =>
+  call("service_install", { runnerId });
 
-export async function uninstallService(runnerId: string): Promise<void> {
-  return invoke("service_uninstall", { runnerId });
-}
+export const setRunOnBoot = (runnerId: string, enabled: boolean): Promise<void> =>
+  call("service_enable_on_boot", { runnerId, enabled });
 
-export async function setRunOnBoot(
-  runnerId: string,
-  enabled: boolean
-): Promise<void> {
-  return invoke("service_enable_on_boot", { runnerId, enabled });
-}
+export const fetchServiceStatus = (runnerId: string): Promise<ServiceStatus> =>
+  call("service_status", { runnerId });
 
-export async function fetchServiceStatus(
-  runnerId: string
-): Promise<ServiceStatus> {
-  return invoke("service_status", { runnerId });
-}
+export const fetchServiceStatusAll = (): Promise<Record<string, ServiceStatus>> =>
+  call("service_status_all");
 
-export async function fetchServiceStatusAll(): Promise<Record<string, ServiceStatus>> {
-  return invoke("service_status_all");
-}
+export const listLogSources = (runnerId: string): Promise<LogSource[]> =>
+  call("logs_list_sources", { runnerId });
 
-export async function startService(runnerId: string): Promise<void> {
-  return invoke("service_start", { runnerId });
-}
-
-export async function stopService(runnerId: string): Promise<void> {
-  return invoke("service_stop", { runnerId });
-}
-
-export async function listLogSources(runnerId: string): Promise<LogSource[]> {
-  return invoke("logs_list_sources", { runnerId });
-}
-
-export async function tailLogs(
+export const tailLogs = (
   runnerId: string,
   source: string,
   limit?: number
-): Promise<LogLine[]> {
-  return invoke("logs_tail", { runnerId, source, limit });
-}
+): Promise<LogLine[]> => call("logs_tail", { runnerId, source, limit });
 
-export async function discoverScan(): Promise<DiscoveryCandidate[]> {
-  return invoke("discover_scan");
-}
+export const discoverScan = (): Promise<DiscoveryCandidate[]> => call("discover_scan");
 
-export async function discoverImport(
+export const discoverImport = (
   candidateId: string,
-  options: { replace_service: boolean; move_install: boolean; verify_after_move?: boolean; delete_original_after_verify?: boolean }
-): Promise<string> {
-  return invoke("discover_import", { candidateId, options });
-}
+  options: {
+    replace_service: boolean;
+    move_install: boolean;
+    verify_after_move?: boolean;
+    delete_original_after_verify?: boolean;
+  }
+): Promise<string> => call("discover_import", { candidateId, options });
 
-export async function discoverAdopt(
-  candidateId: string,
-  options: { strategy: AdoptionDefault; replace_service: boolean; delete_original_after_verify?: boolean }
-): Promise<string> {
-  return invoke("discover_adopt", { candidateId, options });
-}
-
-export async function discoverMigrateService(
+export const discoverMigrateService = (
   runnerId: string,
   strategy: ServiceMigrationStrategy
-): Promise<void> {
-  return invoke("discover_migrate_service", { runnerId, strategy });
-}
+): Promise<void> => call("discover_migrate_service", { runnerId, strategy });
 
-export async function discoverRemoveExternalArtifacts(runnerId: string): Promise<void> {
-  return invoke("discover_remove_external_artifacts", { runnerId });
-}
+export const discoverRemoveExternalArtifacts = (runnerId: string): Promise<void> =>
+  call("discover_remove_external_artifacts", { runnerId });
 
-export async function discoverVerifyRunner(
+export const discoverVerifyRunner = (
   runnerId: string
-): Promise<{ ok: boolean; reason?: string | null }> {
-  return invoke("discover_verify_runner", { runnerId });
-}
+): Promise<{ ok: boolean; reason?: string | null }> =>
+  call("discover_verify_runner", { runnerId });
 
-export async function discoverDeleteOriginalInstall(runnerId: string): Promise<void> {
-  return invoke("discover_delete_original_install", { runnerId });
-}
+export const discoverDeleteOriginalInstall = (runnerId: string): Promise<void> =>
+  call("discover_delete_original_install", { runnerId });
 
-export async function discoverMoveInstall(
+export const discoverMoveInstall = (
   runnerId: string,
   destination?: string
-): Promise<RunnerProfile> {
-  return invoke("discover_move_install", { runnerId, destination });
-}
+): Promise<RunnerProfile> => call("discover_move_install", { runnerId, destination });
 
-export async function discoverRollbackMove(
-  runnerId: string
-): Promise<RunnerProfile> {
-  return invoke("discover_rollback_move", { runnerId });
-}
+export const discoverRollbackMove = (runnerId: string): Promise<RunnerProfile> =>
+  call("discover_rollback_move", { runnerId });
