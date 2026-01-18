@@ -97,6 +97,9 @@
   let runnerLabels = $state("");
   let workDir = $state("");
 
+  let configDraftRunnerId = $state<string | null>(null);
+  let configDraftDirty = $state(false);
+
   let repoOptions = $state<GitHubRepoInfo[]>([]);
   let repoFilter = $state("");
   let repoAdminOnly = $state(true);
@@ -162,6 +165,17 @@
       .filter(Boolean);
   }
 
+  function labelsMatch(a: string[], b: string[]): boolean {
+    const normalize = (labels: string[]) =>
+      labels
+        .map((label) => label.trim())
+        .filter(Boolean)
+        .slice()
+        .sort((left, right) => left.localeCompare(right))
+        .join("\u0000");
+    return normalize(a) === normalize(b);
+  }
+
   function selectedRunner(): RunnerProfile | null {
     if (!snapshot || !selectedRunnerId) return null;
     return snapshot.config.runners.find((runner) => runner.runner_id === selectedRunnerId) ?? null;
@@ -190,6 +204,41 @@
     }
 
     return runners[0].runner_id;
+  }
+
+  function hydrateConfigDraft(runner: RunnerProfile) {
+    configDraftRunnerId = runner.runner_id;
+    configDraftDirty = false;
+    displayName = runner.display_name;
+    runnerName = runner.runner_name;
+    runnerLabels = runner.labels.join(", ");
+    workDir = runner.work_dir;
+
+    if (runner.scope) {
+      scopeType = runner.scope.type;
+      if (runner.scope.type === "repo") {
+        scopeOwner = runner.scope.owner;
+        scopeRepo = runner.scope.repo;
+      }
+      if (runner.scope.type === "org") {
+        scopeOrg = runner.scope.org;
+      }
+      if (runner.scope.type === "enterprise") {
+        scopeEnterprise = runner.scope.enterprise;
+      }
+    } else {
+      scopeType = "repo";
+      scopeOwner = "";
+      scopeRepo = "";
+      scopeOrg = "";
+      scopeEnterprise = "";
+    }
+  }
+
+  function markConfigDirty() {
+    if (!showCreate) {
+      configDraftDirty = true;
+    }
   }
 
   function requireTypedConfirm(message: string, expected: string): boolean {
@@ -484,6 +533,7 @@
       await repairRunnerScope(selectedRunnerId);
       await refreshState();
       await refreshSelectedStatus();
+      configDraftDirty = false;
     } catch (error) {
       errorMessage = formatError(error);
       if (errorMessage?.includes("unable to infer scope")) {
@@ -508,6 +558,7 @@
       await refreshState();
       await refreshSelectedStatus();
       showManualScopeRepair = false;
+      configDraftDirty = false;
     } catch (error) {
       errorMessage = formatError(error);
     } finally {
@@ -548,6 +599,7 @@
     scopeOwner = repo.owner;
     scopeRepo = repo.repo;
     clearScopeHelpers();
+    markConfigDirty();
   }
 
   function filteredOrgs(): GitHubOrgInfo[] {
@@ -573,6 +625,7 @@
   function handleSelectOrg(org: GitHubOrgInfo) {
     scopeOrg = org.org;
     clearScopeHelpers();
+    markConfigDirty();
   }
 
   async function handleConfigure() {
@@ -646,30 +699,52 @@
     try {
       const runner = selectedRunner();
       if (!runner) return;
-      let scope = runner.scope;
-      if (!scope) {
-        const repaired = await repairRunnerScope(selectedRunnerId);
-        scope = repaired.scope;
-        await refreshState();
+      const desiredRunnerName = runnerName.trim();
+      const desiredWorkDir = workDir.trim();
+      const desiredLabels = labelsArray();
+      const desiredDisplayName = displayName.trim() || desiredRunnerName;
+
+      const needsReconfigure =
+        desiredRunnerName !== runner.runner_name ||
+        desiredWorkDir !== runner.work_dir ||
+        !labelsMatch(desiredLabels, runner.labels);
+
+      if (needsReconfigure) {
+        if (!desiredRunnerName) {
+          errorMessage = "Runner name is required.";
+          return;
+        }
+        if (!desiredWorkDir) {
+          errorMessage = "Work directory is required.";
+          return;
+        }
+        let scope = runner.scope;
+        if (!scope) {
+          const repaired = await repairRunnerScope(selectedRunnerId);
+          scope = repaired.scope;
+          await refreshState();
+        }
+        if (!scope) {
+          errorMessage =
+            "Runner scope is missing and could not be repaired automatically. Re-run configuration to set scope.";
+          showManualScopeRepair = true;
+          return;
+        }
+        await configureRunner({
+          runnerId: selectedRunnerId,
+          scope,
+          name: desiredRunnerName,
+          labels: desiredLabels,
+          workDir: desiredWorkDir,
+        });
       }
-      if (!scope) {
-        errorMessage =
-          "Runner scope is missing and could not be repaired automatically. Re-run configuration to set scope.";
-        showManualScopeRepair = true;
-        return;
+
+      if (desiredDisplayName && desiredDisplayName !== runner.display_name) {
+        await updateRunnerProfile(selectedRunnerId, { display_name: desiredDisplayName });
       }
-      await configureRunner({
-        runnerId: selectedRunnerId,
-        scope,
-        name: runnerName.trim(),
-        labels: labelsArray(),
-        workDir: workDir.trim(),
-      });
-      await updateRunnerProfile(selectedRunnerId, {
-        display_name: displayName.trim() || runnerName.trim(),
-      });
       await refreshState();
       await refreshSelectedStatus();
+      configDraftDirty = false;
     } catch (error) {
       errorMessage = formatError(error);
     } finally {
@@ -1102,24 +1177,16 @@
 
   $effect(() => {
     const runner = selectedRunner();
-    if (runner) {
-      displayName = runner.display_name;
-      runnerName = runner.runner_name;
-      runnerLabels = runner.labels.join(", ");
-      workDir = runner.work_dir;
-      if (runner.scope) {
-        scopeType = runner.scope.type;
-        if (runner.scope.type === "repo") {
-          scopeOwner = runner.scope.owner;
-          scopeRepo = runner.scope.repo;
-        }
-        if (runner.scope.type === "org") {
-          scopeOrg = runner.scope.org;
-        }
-        if (runner.scope.type === "enterprise") {
-          scopeEnterprise = runner.scope.enterprise;
-        }
-      }
+    if (!runner) return;
+    if (showCreate) return;
+
+    if (configDraftRunnerId !== runner.runner_id) {
+      hydrateConfigDraft(runner);
+      return;
+    }
+
+    if (!configDraftDirty) {
+      hydrateConfigDraft(runner);
     }
   });
 </script>
@@ -1694,22 +1761,26 @@
                         class="w-full rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-2 text-sm text-white"
                         placeholder="Display name"
                         bind:value={displayName}
+                        oninput={markConfigDirty}
                       />
                       <input
                         class="w-full rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-2 text-sm text-white"
                         placeholder="Runner name"
                         bind:value={runnerName}
+                        oninput={markConfigDirty}
                       />
                     </div>
                     <input
                       class="w-full rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-2 text-sm text-white"
                       placeholder="Labels (comma separated)"
                       bind:value={runnerLabels}
+                      oninput={markConfigDirty}
                     />
                     <input
                       class="w-full rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-2 text-sm text-white"
                       placeholder="Work directory"
                       bind:value={workDir}
+                      oninput={markConfigDirty}
                     />
                     <div class="flex flex-wrap gap-3">
                       <button
@@ -2235,22 +2306,26 @@
                 class="w-full rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-2 text-sm text-white"
                 placeholder="Display name"
                 bind:value={displayName}
+                oninput={markConfigDirty}
               />
               <input
                 class="w-full rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-2 text-sm text-white"
                 placeholder="Runner name"
                 bind:value={runnerName}
+                oninput={markConfigDirty}
               />
             </div>
             <input
               class="mt-3 w-full rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-2 text-sm text-white"
               placeholder="Labels (comma separated)"
               bind:value={runnerLabels}
+              oninput={markConfigDirty}
             />
             <input
               class="mt-3 w-full rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-2 text-sm text-white"
               placeholder="Work directory"
               bind:value={workDir}
+              oninput={markConfigDirty}
             />
           </div>
 
