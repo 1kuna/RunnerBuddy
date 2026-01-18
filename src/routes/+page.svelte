@@ -167,6 +167,31 @@
     return snapshot.config.runners.find((runner) => runner.runner_id === selectedRunnerId) ?? null;
   }
 
+  function isRunnerIdNotFoundError(error: unknown): boolean {
+    const message = formatError(error);
+    return message.includes("runner error: runner ") && message.includes(" not found");
+  }
+
+  function resolveSelectedRunnerId(currentSnapshot: AppSnapshot | null): string | null {
+    if (!currentSnapshot) return null;
+    const runners = currentSnapshot.config.runners;
+    if (!runners.length) return null;
+
+    if (
+      selectedRunnerId &&
+      runners.some((runner) => runner.runner_id === selectedRunnerId)
+    ) {
+      return selectedRunnerId;
+    }
+
+    const configSelected = currentSnapshot.config.selected_runner_id ?? null;
+    if (configSelected && runners.some((runner) => runner.runner_id === configSelected)) {
+      return configSelected;
+    }
+
+    return runners[0].runner_id;
+  }
+
   function requireTypedConfirm(message: string, expected: string): boolean {
     const input = prompt(`${message}\nType \"${expected}\" to confirm.`);
     return input === expected;
@@ -209,9 +234,7 @@
 
   async function refreshState() {
     snapshot = await runnersList();
-    if (snapshot?.config.selected_runner_id) {
-      selectedRunnerId ||= snapshot.config.selected_runner_id;
-    }
+    selectedRunnerId = resolveSelectedRunnerId(snapshot);
     if (snapshot?.config.pat_default_alias) {
       patAlias ||= snapshot.config.pat_default_alias;
     }
@@ -222,12 +245,24 @@
   }
 
   async function refreshSelectedStatus() {
-    if (!selectedRunnerId) return;
-    const runtime = await fetchRunnerStatus(selectedRunnerId);
-    snapshot = snapshot
-      ? { ...snapshot, runtime: { ...snapshot.runtime, [selectedRunnerId]: runtime } }
-      : null;
-    serviceStatusMap[selectedRunnerId] = await fetchServiceStatus(selectedRunnerId);
+    const runner = selectedRunner();
+    if (!runner) return;
+    const runnerId = runner.runner_id;
+    try {
+      const runtime = await fetchRunnerStatus(runnerId);
+      snapshot = snapshot ? { ...snapshot, runtime: { ...snapshot.runtime, [runnerId]: runtime } } : null;
+      serviceStatusMap[runnerId] = await fetchServiceStatus(runnerId);
+    } catch (error) {
+      if (isRunnerIdNotFoundError(error)) {
+        try {
+          await refreshState();
+        } catch (refreshError) {
+          errorMessage ??= formatError(refreshError);
+        }
+        return;
+      }
+      errorMessage ??= formatError(error);
+    }
   }
 
   async function refreshAllStatuses() {
@@ -239,13 +274,31 @@
   }
 
   async function refreshLogs() {
-    if (!selectedRunnerId) return;
-    logSources = await listLogSources(selectedRunnerId);
-    if (!selectedLogSource && logSources.length) {
-      selectedLogSource = logSources[0].id;
-    }
-    if (selectedLogSource) {
-      logLines = await tailLogs(selectedRunnerId, selectedLogSource, 200);
+    const runner = selectedRunner();
+    if (!runner) return;
+    const runnerId = runner.runner_id;
+    try {
+      logSources = await listLogSources(runnerId);
+      const desiredSource =
+        selectedLogSource && logSources.some((source) => source.id === selectedLogSource)
+          ? selectedLogSource
+          : logSources[0]?.id ?? "";
+      selectedLogSource = desiredSource;
+      if (desiredSource) {
+        logLines = await tailLogs(runnerId, desiredSource, 200);
+      } else {
+        logLines = [];
+      }
+    } catch (error) {
+      if (isRunnerIdNotFoundError(error)) {
+        try {
+          await refreshState();
+        } catch (refreshError) {
+          errorMessage ??= formatError(refreshError);
+        }
+        return;
+      }
+      errorMessage ??= formatError(error);
     }
   }
 

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+use tracing::warn;
 use uuid::Uuid;
 
 const SCHEMA_VERSION: u32 = 3;
@@ -409,6 +410,9 @@ impl ConfigStore {
                     needs_save = true;
                 }
             }
+            if sanitize_selected_runner_id(&mut config) {
+                needs_save = true;
+            }
             config
         } else {
             Config::default()
@@ -437,6 +441,7 @@ impl ConfigStore {
     {
         let mut guard = self.inner.lock().expect("config mutex poisoned");
         updater(&mut guard);
+        sanitize_selected_runner_id(&mut guard);
         self.save_locked(&guard)?;
         Ok(guard.clone())
     }
@@ -487,6 +492,36 @@ fn apply_missing_fields(config: &mut Config, value: &serde_json::Value) -> bool 
         updated = true;
     }
     updated
+}
+
+fn sanitize_selected_runner_id(config: &mut Config) -> bool {
+    let previous = config.selected_runner_id.clone();
+    let next = if config.runners.is_empty() {
+        None
+    } else {
+        match previous.as_deref() {
+            Some(selected)
+                if config
+                    .runners
+                    .iter()
+                    .any(|runner| runner.runner_id == selected) =>
+            {
+                previous.clone()
+            }
+            _ => Some(config.runners[0].runner_id.clone()),
+        }
+    };
+
+    if previous == next {
+        return false;
+    }
+
+    warn!(
+        "Repairing config selected runner id from {:?} to {:?}",
+        previous, next
+    );
+    config.selected_runner_id = next;
+    true
 }
 
 pub fn data_dir() -> Result<PathBuf, Error> {
