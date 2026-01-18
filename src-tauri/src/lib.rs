@@ -1004,6 +1004,87 @@ async fn discover_move_install(
     discovery::move_install(&state.config, &runner_id, destination).map_err(AppError::from)
 }
 
+#[tauri::command]
+async fn discover_rollback_move(
+    state: State<'_, AppState>,
+    runner_id: String,
+) -> AppResult<RunnerProfile> {
+    let profile = get_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
+    let original_path = validate_rollback_move(&profile)?;
+    if !original_path.exists() || !discovery::looks_like_runner_install(&original_path) {
+        return Err(AppError::new(
+            "runner",
+            "original install path is missing or does not look like a runner directory",
+        ));
+    }
+    if profile.service.provider == crate::config::ServiceProvider::External {
+        return Err(AppError::new(
+            "service",
+            "external service is managing this runner; replace or remove external artifacts first",
+        ));
+    }
+
+    info!(
+        "Rollback move requested for {} ({} -> {})",
+        runner_id,
+        profile.install.install_path,
+        original_path.to_string_lossy()
+    );
+
+    let managed_path = util::expand_path(&profile.install.install_path);
+    let _ = runner_mgmt::stop_runner(&runner_id, &state.runner_children);
+    if profile.service.provider == crate::config::ServiceProvider::Runnerbuddy
+        && profile.service.installed
+    {
+        let _ = service_mgmt::stop(&profile);
+        service_mgmt::uninstall(&profile).map_err(AppError::from)?;
+    }
+
+    let original_path_str = original_path.to_string_lossy().to_string();
+    let updated = state
+        .config
+        .update(|config| {
+            if let Some(runner) = config
+                .runners
+                .iter_mut()
+                .find(|runner| runner.runner_id == runner_id)
+            {
+                runner.install.mode = crate::config::InstallMode::Adopted;
+                runner.install.install_path = original_path_str.clone();
+                runner.install.adopted_from_path = None;
+                runner.install.migration_status = crate::config::MigrationStatus::None;
+            }
+        })
+        .map_err(AppError::from)?;
+
+    let updated_profile = get_runner(&updated, &runner_id).map_err(AppError::from)?;
+    if profile.service.provider == crate::config::ServiceProvider::Runnerbuddy
+        && profile.service.installed
+    {
+        service_mgmt::install(&updated_profile).map_err(AppError::from)?;
+    }
+
+    if managed_path == original_path {
+        warn!("Rollback skipped deleting managed copy because paths match: {:?}", managed_path);
+    } else if should_delete_managed_copy(&runner_id, &managed_path) {
+        if managed_path.exists() && discovery::looks_like_runner_install(&managed_path) {
+            if let Err(err) = std::fs::remove_dir_all(&managed_path) {
+                warn!(
+                    "Rollback left managed copy in place (failed to delete {:?}): {err}",
+                    managed_path
+                );
+            }
+        }
+    } else {
+        warn!(
+            "Rollback did not delete managed copy (path outside managed runners dir): {:?}",
+            managed_path
+        );
+    }
+
+    Ok(updated_profile)
+}
+
 async fn verify_runner_install(
     state: &State<'_, AppState>,
     runner_id: &str,
@@ -1097,6 +1178,39 @@ fn validate_delete_original_install(profile: &RunnerProfile) -> AppResult<PathBu
         .clone()
         .ok_or_else(|| AppError::new("runner", "no original install recorded"))?;
     Ok(PathBuf::from(original))
+}
+
+fn validate_rollback_move(profile: &RunnerProfile) -> AppResult<PathBuf> {
+    if profile.install.mode != crate::config::InstallMode::Managed {
+        return Err(AppError::new("runner", "runner is not managed"));
+    }
+    if profile.install.migration_status == crate::config::MigrationStatus::Verified {
+        return Err(AppError::new(
+            "runner",
+            "runner has been verified since migration; rollback is not allowed",
+        ));
+    }
+    let original = profile
+        .install
+        .adopted_from_path
+        .clone()
+        .ok_or_else(|| AppError::new("runner", "no original install recorded"))?;
+    let original_path = util::expand_path(&original);
+    Ok(original_path)
+}
+
+fn should_delete_managed_copy(runner_id: &str, install_path: &PathBuf) -> bool {
+    let managed_dir = match crate::config::managed_runners_dir() {
+        Ok(path) => path,
+        Err(_) => return false,
+    };
+    if install_path.starts_with(&managed_dir) {
+        return true;
+    }
+    match crate::config::default_install_path(runner_id) {
+        Ok(expected) => install_path == &expected,
+        Err(_) => false,
+    }
 }
 
 fn delete_original_install(state: &State<'_, AppState>, runner_id: &str) -> AppResult<()> {
@@ -1240,6 +1354,7 @@ pub fn run() {
             discover_verify_runner,
             discover_delete_original_install,
             discover_move_install,
+            discover_rollback_move,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1348,6 +1463,30 @@ mod tests {
         profile.service.external_id = None;
         profile.service.external_path = None;
         let path = validate_delete_original_install(&profile).expect("path");
+        assert_eq!(path.to_string_lossy(), "/tmp/original");
+    }
+
+    #[test]
+    fn validate_rollback_move_requires_managed() {
+        let mut profile = sample_profile();
+        profile.install.mode = InstallMode::Adopted;
+        let err = validate_rollback_move(&profile).expect_err("error");
+        assert_eq!(err.code, "runner");
+    }
+
+    #[test]
+    fn validate_rollback_move_blocks_verified() {
+        let profile = sample_profile();
+        let err = validate_rollback_move(&profile).expect_err("error");
+        assert_eq!(err.code, "runner");
+    }
+
+    #[test]
+    fn validate_rollback_move_returns_path() {
+        let mut profile = sample_profile();
+        profile.install.migration_status = MigrationStatus::Failed;
+        profile.install.mode = InstallMode::Managed;
+        let path = validate_rollback_move(&profile).expect("path");
         assert_eq!(path.to_string_lossy(), "/tmp/original");
     }
 

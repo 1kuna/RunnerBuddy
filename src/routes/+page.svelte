@@ -14,6 +14,7 @@
     discoverDeleteOriginalInstall,
     discoverImport,
     discoverMigrateService,
+    discoverRollbackMove,
     discoverRemoveExternalArtifacts,
     discoverMoveInstall,
     discoverScan,
@@ -161,6 +162,14 @@
   function canDeleteOriginal(runner: RunnerProfile | null): boolean {
     if (!runner) return false;
     return runner.install.migration_status === "verified" && !!runner.install.adopted_from_path;
+  }
+
+  function canRollbackMove(runner: RunnerProfile | null): boolean {
+    if (!runner) return false;
+    if (runner.install.mode !== "managed") return false;
+    if (!runner.install.adopted_from_path) return false;
+    if (runner.service.provider === "external") return false;
+    return runner.install.migration_status !== "verified";
   }
 
   function runnerRuntime(runnerId: string | null): RunnerStatus | null {
@@ -517,6 +526,32 @@
       }
       await refreshState();
       await refreshSelectedStatus();
+    } catch (error) {
+      errorMessage = `${error}`;
+    } finally {
+      isBusy = false;
+    }
+  }
+
+  async function handleRollbackMove() {
+    if (!selectedRunnerId) return;
+    const runner = selectedRunner();
+    const expected = runner?.display_name || runner?.runner_name || "rollback";
+    if (
+      !requireTypedConfirm(
+        "Rollback the move and switch back to the original install?",
+        expected
+      )
+    ) {
+      return;
+    }
+    errorMessage = null;
+    isBusy = true;
+    try {
+      await discoverRollbackMove(selectedRunnerId);
+      await refreshState();
+      await refreshSelectedStatus();
+      await refreshLogs();
     } catch (error) {
       errorMessage = `${error}`;
     } finally {
@@ -1402,6 +1437,13 @@
                         disabled={isBusy || selectedRunner()?.service.provider === "external"}
                       >
                         Verify install
+                      </button>
+                      <button
+                        class="rounded-lg border border-amber-300/40 px-3 py-1 text-xs font-semibold text-amber-100"
+                        onclick={handleRollbackMove}
+                        disabled={isBusy || !canRollbackMove(selectedRunner())}
+                      >
+                        Rollback move
                       </button>
                       <button
                         class="rounded-lg border border-red-300/40 px-3 py-1 text-xs font-semibold text-red-100"

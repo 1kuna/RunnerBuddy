@@ -332,3 +332,9 @@ export async function discoverMoveInstall(
 ): Promise<RunnerProfile> {
   return invoke("discover_move_install", { runnerId, destination });
 }
+
+export async function discoverRollbackMove(
+  runnerId: string
+): Promise<RunnerProfile> {
+  return invoke("discover_rollback_move", { runnerId });
+}
