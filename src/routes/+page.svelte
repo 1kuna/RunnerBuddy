@@ -5,6 +5,7 @@
   import { getVersion } from "@tauri-apps/api/app";
   import { check } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
+  import { formatError } from "$lib/errors";
   import {
     checkPat,
     clearPat,
@@ -232,7 +233,7 @@
       const snapshot = await getSettings();
       applySettingsSnapshot(snapshot);
     } catch (error) {
-      settingsError = `${error}`;
+      settingsError = formatError(error);
     } finally {
       settingsLoaded = true;
     }
@@ -253,7 +254,7 @@
         updateError = null;
       }
     } catch (error) {
-      settingsError = `${error}`;
+      settingsError = formatError(error);
       if (settingsSnapshot) {
         applySettingsSnapshot(settingsSnapshot);
       }
@@ -280,7 +281,7 @@
         wizardStep = 2;
       }
     } catch (error) {
-      errorMessage = `${error}`;
+      errorMessage = formatError(error);
     } finally {
       isBusy = false;
     }
@@ -321,7 +322,7 @@
       wizardStep = 5;
       showCreate = false;
     } catch (error) {
-      errorMessage = `${error}`;
+      errorMessage = formatError(error);
     } finally {
       isBusy = false;
     }
@@ -336,7 +337,7 @@
       await refreshSelectedStatus();
       await refreshLogs();
     } catch (error) {
-      errorMessage = `${error}`;
+      errorMessage = formatError(error);
     } finally {
       isBusy = false;
     }
@@ -350,7 +351,7 @@
       await stopRunner(selectedRunnerId);
       await refreshSelectedStatus();
     } catch (error) {
-      errorMessage = `${error}`;
+      errorMessage = formatError(error);
     } finally {
       isBusy = false;
     }
@@ -379,7 +380,7 @@
       await refreshState();
       await refreshSelectedStatus();
     } catch (error) {
-      errorMessage = `${error}`;
+      errorMessage = formatError(error);
     } finally {
       isBusy = false;
     }
@@ -402,7 +403,7 @@
       await refreshState();
       await refreshSelectedStatus();
     } catch (error) {
-      errorMessage = `${error}`;
+      errorMessage = formatError(error);
     } finally {
       isBusy = false;
     }
@@ -434,7 +435,7 @@
       await refreshState();
       selectedRunnerId = snapshot?.config.selected_runner_id ?? null;
     } catch (error) {
-      errorMessage = `${error}`;
+      errorMessage = formatError(error);
     } finally {
       isBusy = false;
     }
@@ -446,7 +447,7 @@
     try {
       discoveryCandidates = await discoverScan();
     } catch (error) {
-      errorMessage = `${error}`;
+      errorMessage = formatError(error);
     } finally {
       isScanning = false;
     }
@@ -470,7 +471,7 @@
       await handleSelectRunner(runnerId);
       discoveryCandidates = discoveryCandidates.filter((item) => item.candidate_id !== candidate.candidate_id);
     } catch (error) {
-      errorMessage = `${error}`;
+      errorMessage = formatError(error);
     } finally {
       isBusy = false;
     }
@@ -490,7 +491,7 @@
       await refreshState();
       await refreshSelectedStatus();
     } catch (error) {
-      errorMessage = `${error}`;
+      errorMessage = formatError(error);
     } finally {
       isBusy = false;
     }
@@ -509,7 +510,7 @@
       await refreshState();
       await refreshSelectedStatus();
     } catch (error) {
-      errorMessage = `${error}`;
+      errorMessage = formatError(error);
     } finally {
       isBusy = false;
     }
@@ -527,7 +528,7 @@
       await refreshState();
       await refreshSelectedStatus();
     } catch (error) {
-      errorMessage = `${error}`;
+      errorMessage = formatError(error);
     } finally {
       isBusy = false;
     }
@@ -553,7 +554,7 @@
       await refreshSelectedStatus();
       await refreshLogs();
     } catch (error) {
-      errorMessage = `${error}`;
+      errorMessage = formatError(error);
     } finally {
       isBusy = false;
     }
@@ -572,7 +573,7 @@
       await discoverDeleteOriginalInstall(selectedRunnerId);
       await refreshState();
     } catch (error) {
-      errorMessage = `${error}`;
+      errorMessage = formatError(error);
     } finally {
       isBusy = false;
     }
@@ -591,7 +592,7 @@
       await discoverRemoveExternalArtifacts(selectedRunnerId);
       await refreshState();
     } catch (error) {
-      errorMessage = `${error}`;
+      errorMessage = formatError(error);
     } finally {
       isBusy = false;
     }
@@ -634,7 +635,7 @@
       applySettingsSnapshot(snapshot);
       await goto("/onboarding");
     } catch (error) {
-      settingsError = `${error}`;
+      settingsError = formatError(error);
     } finally {
       settingsBusy = false;
     }
@@ -658,19 +659,19 @@
       try {
         await refreshState();
       } catch (error) {
-        errorMessage = `${error}`;
+        errorMessage = formatError(error);
       }
 
       try {
         await refreshAllStatuses();
       } catch (error) {
-        errorMessage ??= `${error}`;
+        errorMessage ??= formatError(error);
       }
 
       try {
         await refreshLogs();
       } catch (error) {
-        errorMessage ??= `${error}`;
+        errorMessage ??= formatError(error);
       }
 
       await settingsPromise;
@@ -730,7 +731,7 @@
     try {
       pendingUpdate = await check();
     } catch (error) {
-      if (!silent) updateError = `${error}`;
+      if (!silent) updateError = formatError(error);
     } finally {
       updateCheckBusy = false;
     }
@@ -753,7 +754,7 @@
       await pendingUpdate.close();
       await relaunch();
     } catch (error) {
-      updateError = `${error}`;
+      updateError = formatError(error);
       try {
         await pendingUpdate.close();
       } catch {

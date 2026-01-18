@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
+  import { formatError } from "$lib/errors";
   import {
     completeOnboarding,
     discoverDeleteOriginalInstall,
@@ -67,7 +68,7 @@
         autoCheckOnLaunch = settingsSnapshot.settings.auto_check_updates_on_launch;
         adoptionDefault = settingsSnapshot.settings.adoption_default;
       } catch (error) {
-        errorMessage = `${error}`;
+        errorMessage = formatError(error);
       }
     })();
     return () => {
@@ -135,7 +136,7 @@
       }
       step = 3;
     } catch (error) {
-      errorMessage = `${error}`;
+      errorMessage = formatError(error);
     } finally {
       isBusy = false;
     }
@@ -155,7 +156,7 @@
       }
       step = 5;
     } catch (error) {
-      errorMessage = `${error}`;
+      errorMessage = formatError(error);
     } finally {
       isBusy = false;
     }
@@ -168,7 +169,7 @@
       discoveryCandidates = await discoverScan();
       initCandidateOptions(discoveryCandidates);
     } catch (error) {
-      errorMessage = `${error}`;
+      errorMessage = formatError(error);
     } finally {
       isScanning = false;
     }
@@ -245,7 +246,7 @@
               } catch (error) {
                 executeStates[candidate.candidate_id] = {
                   status: "needs_action",
-                  detail: `${error}`,
+                  detail: formatError(error),
                   runnerId,
                 };
               }
@@ -270,7 +271,7 @@
         } catch (error) {
           executeStates[candidate.candidate_id] = {
             status: "failed",
-            detail: `${error}`,
+            detail: formatError(error),
           };
         }
       }
@@ -289,7 +290,7 @@
       }
       await goto("/");
     } catch (error) {
-      errorMessage = `${error}`;
+      errorMessage = formatError(error);
     } finally {
       isBusy = false;
     }
