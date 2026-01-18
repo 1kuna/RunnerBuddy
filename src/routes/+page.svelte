@@ -1140,7 +1140,8 @@
                       }`}
                     ></span>
                   </div>
-                  <p class="mt-1 break-all text-xs text-slate-400">
+                  <p class="mt-1 truncate text-xs text-slate-400">{scopeLabel(runner.scope)}</p>
+                  <p class="mt-1 break-all text-xs text-slate-500">
                     {runner.install.mode} · {runner.service.provider} · {runner.install.install_path}
                   </p>
                 </button>
@@ -1829,6 +1830,9 @@
                   Service: <span class="font-semibold text-white">
                     {selectedRunnerId && serviceStatusMap[selectedRunnerId]?.running ? "Running" : "Stopped"}
                   </span>
+                </div>
+                <div class="rounded-xl border border-slate-500/40 px-3 py-2 text-sm text-slate-200">
+                  Scope: <span class="font-semibold text-white">{scopeLabel(selectedRunner()?.scope)}</span>
                 </div>
                 <div class="rounded-xl border border-slate-500/40 px-3 py-2 text-sm text-slate-200">
                   Provider: <span class="font-semibold text-white">{selectedRunner()?.service.provider}</span>
