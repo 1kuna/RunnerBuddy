@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { goto } from "$app/navigation";
   import { listen } from "@tauri-apps/api/event";
   import { getVersion } from "@tauri-apps/api/app";
   import { check } from "@tauri-apps/plugin-updater";
@@ -10,8 +11,8 @@
     configureRunner,
     createRunnerProfile,
     deleteRunnerProfile,
-    discoverImport,
     discoverDeleteOriginalInstall,
+    discoverImport,
     discoverMigrateService,
     discoverRemoveExternalArtifacts,
     discoverMoveInstall,
@@ -22,9 +23,11 @@
     fetchRunnerStatusAll,
     fetchServiceStatus,
     fetchServiceStatusAll,
+    getSettings,
     installService,
     listLogSources,
     runnersList,
+    resetOnboarding,
     savePat,
     selectRunner,
     setDefaultPatAlias,
@@ -32,7 +35,9 @@
     startRunner,
     stopRunner,
     tailLogs,
+    updateSettings,
     updateRunnerProfile,
+    type AdoptionDefault,
     type AppSnapshot,
     type DiscoveryCandidate,
     type LogLine,
@@ -41,7 +46,8 @@
     type RunnerProfile,
     type RunnerScope,
     type RunnerStatus,
-    type ServiceStatus
+    type ServiceStatus,
+    type SettingsSnapshot
   } from "$lib/api";
 
   type RunnerStatusPayload = {
@@ -92,6 +98,13 @@
   let updateInstallBusy = $state(false);
   let updateError = $state<string | null>(null);
   let pendingUpdate = $state<any | null>(null);
+  let settingsSnapshot = $state<SettingsSnapshot | null>(null);
+  let settingsBusy = $state(false);
+  let settingsError = $state<string | null>(null);
+  let settingsLoaded = $state(false);
+  let autoUpdatesEnabled = $state(true);
+  let autoCheckOnLaunch = $state(true);
+  let adoptionDefault = $state<AdoptionDefault>("adopt");
 
   const stepTitles = [
     "Save access token",
@@ -194,6 +207,49 @@
     }
     if (selectedLogSource) {
       logLines = await tailLogs(selectedRunnerId, selectedLogSource, 200);
+    }
+  }
+
+  function applySettingsSnapshot(snapshot: SettingsSnapshot) {
+    settingsSnapshot = snapshot;
+    autoUpdatesEnabled = snapshot.settings.auto_updates_enabled;
+    autoCheckOnLaunch = snapshot.settings.auto_check_updates_on_launch;
+    adoptionDefault = snapshot.settings.adoption_default;
+  }
+
+  async function loadSettings() {
+    settingsError = null;
+    try {
+      const snapshot = await getSettings();
+      applySettingsSnapshot(snapshot);
+    } catch (error) {
+      settingsError = `${error}`;
+    } finally {
+      settingsLoaded = true;
+    }
+  }
+
+  async function persistSettings(patch: {
+    auto_updates_enabled?: boolean;
+    auto_check_updates_on_launch?: boolean;
+    adoption_default?: AdoptionDefault;
+  }) {
+    settingsError = null;
+    settingsBusy = true;
+    try {
+      const snapshot = await updateSettings(patch);
+      applySettingsSnapshot(snapshot);
+      if (!snapshot.settings.auto_updates_enabled) {
+        pendingUpdate = null;
+        updateError = null;
+      }
+    } catch (error) {
+      settingsError = `${error}`;
+      if (settingsSnapshot) {
+        applySettingsSnapshot(settingsSnapshot);
+      }
+    } finally {
+      settingsBusy = false;
     }
   }
 
@@ -506,6 +562,49 @@
     }
   }
 
+  async function handleAutoUpdatesToggle(enabled: boolean) {
+    autoUpdatesEnabled = enabled;
+    if (!enabled) {
+      autoCheckOnLaunch = false;
+    }
+    await persistSettings({
+      auto_updates_enabled: enabled,
+      auto_check_updates_on_launch: enabled ? autoCheckOnLaunch : false,
+    });
+  }
+
+  async function handleAutoCheckToggle(enabled: boolean) {
+    if (!autoUpdatesEnabled) return;
+    autoCheckOnLaunch = enabled;
+    await persistSettings({ auto_check_updates_on_launch: enabled });
+  }
+
+  async function handleAdoptionDefaultChange(value: AdoptionDefault) {
+    adoptionDefault = value;
+    await persistSettings({ adoption_default: value });
+  }
+
+  async function handleRerunOnboarding() {
+    if (
+      !confirm(
+        "Re-open onboarding? Existing runners are unchanged unless you choose actions."
+      )
+    ) {
+      return;
+    }
+    settingsError = null;
+    settingsBusy = true;
+    try {
+      const snapshot = await resetOnboarding();
+      applySettingsSnapshot(snapshot);
+      await goto("/onboarding");
+    } catch (error) {
+      settingsError = `${error}`;
+    } finally {
+      settingsBusy = false;
+    }
+  }
+
   onMount(() => {
     let unlistenProgress: (() => void) | null = null;
     let unlistenStatus: (() => void) | null = null;
@@ -515,8 +614,11 @@
       await refreshState();
       await refreshAllStatuses();
       await refreshLogs();
+      await loadSettings();
       appVersion = await getVersion();
-      void handleCheckUpdates({ silent: true });
+      if (settingsSnapshot && autoUpdatesEnabled && autoCheckOnLaunch) {
+        void handleCheckUpdates({ silent: true });
+      }
       if (cancelled) return;
       unlistenProgress = await listen<ProgressPayload>("progress", (event) => {
         progress = event.payload;
@@ -552,6 +654,18 @@
     if (updateCheckBusy || updateInstallBusy) return;
     const silent = options?.silent ?? false;
     if (!silent) updateError = null;
+    if (!settingsLoaded) {
+      if (!silent) {
+        updateError = "Settings are still loading.";
+      }
+      return;
+    }
+    if (!autoUpdatesEnabled) {
+      if (!silent) {
+        updateError = "Auto-updates are disabled in Settings.";
+      }
+      return;
+    }
     updateCheckBusy = true;
     try {
       pendingUpdate = await check();
@@ -564,6 +678,14 @@
 
   async function handleInstallUpdate() {
     if (!pendingUpdate) return;
+    if (!settingsLoaded) {
+      updateError = "Settings are still loading.";
+      return;
+    }
+    if (!autoUpdatesEnabled) {
+      updateError = "Auto-updates are disabled in Settings.";
+      return;
+    }
     updateError = null;
     updateInstallBusy = true;
     try {
@@ -718,7 +840,15 @@
             <p class="mt-3 text-sm text-red-200">{updateError}</p>
           {/if}
           <div class="mt-4 space-y-3 text-sm">
-            {#if pendingUpdate}
+            {#if !autoUpdatesEnabled}
+              <p class="text-slate-400">Auto-updates are disabled.</p>
+              <button
+                class="w-full rounded-xl border border-slate-400/30 px-4 py-2 text-sm font-semibold text-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled
+              >
+                Enable updates in Settings
+              </button>
+            {:else if pendingUpdate}
               <p class="text-slate-200">
                 Update available: <span class="font-semibold text-white">{pendingUpdate.version}</span>
               </p>
@@ -734,12 +864,89 @@
               <button
                 class="w-full rounded-xl border border-slate-400/30 px-4 py-2 text-sm font-semibold text-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
                 onclick={() => handleCheckUpdates()}
-                disabled={updateCheckBusy || isBusy}
+                disabled={updateCheckBusy || isBusy || !autoUpdatesEnabled || !settingsLoaded}
               >
                 {updateCheckBusy ? "Checking..." : "Check for updates"}
               </button>
             {/if}
           </div>
+        </div>
+
+        <div class="rounded-2xl px-5 py-6 glass-panel">
+          <div class="flex items-center justify-between">
+            <h2 class="text-sm uppercase tracking-[0.2em] text-slate-400">Settings</h2>
+          </div>
+          {#if settingsError}
+            <p class="mt-3 text-sm text-red-200">{settingsError}</p>
+          {/if}
+          {#if !settingsLoaded}
+            <p class="mt-4 text-sm text-slate-400">Loading settings...</p>
+          {:else}
+            <div class="mt-4 space-y-3 text-sm">
+              <label class="flex items-center justify-between rounded-xl border border-slate-500/40 px-4 py-3">
+                <span class="text-slate-200">Enable auto-updates</span>
+                <input
+                  type="checkbox"
+                  class="rounded border-slate-500 bg-transparent text-tide-500 focus:ring-tide-500"
+                  checked={autoUpdatesEnabled}
+                  onchange={(event) =>
+                    handleAutoUpdatesToggle((event.target as HTMLInputElement).checked)
+                  }
+                  disabled={settingsBusy}
+                />
+              </label>
+              <label
+                class={`flex items-center justify-between rounded-xl border px-4 py-3 ${
+                  autoUpdatesEnabled ? "border-slate-500/40" : "border-slate-600/30 opacity-60"
+                }`}
+              >
+                <span class="text-slate-200">Auto-check on launch</span>
+                <input
+                  type="checkbox"
+                  class="rounded border-slate-500 bg-transparent text-tide-500 focus:ring-tide-500"
+                  checked={autoCheckOnLaunch}
+                  onchange={(event) =>
+                    handleAutoCheckToggle((event.target as HTMLInputElement).checked)
+                  }
+                  disabled={!autoUpdatesEnabled || settingsBusy}
+                />
+              </label>
+
+              <div class="rounded-xl border border-slate-500/40 px-4 py-3 text-sm">
+                <p class="text-xs uppercase tracking-[0.2em] text-slate-400">Adoption default</p>
+                <div class="mt-3 space-y-2 text-xs text-slate-300">
+                  <label class="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="adoption-default"
+                      checked={adoptionDefault === "adopt"}
+                      onchange={() => handleAdoptionDefaultChange("adopt")}
+                      disabled={settingsBusy}
+                    />
+                    Adopt in place
+                  </label>
+                  <label class="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="adoption-default"
+                      checked={adoptionDefault === "move_verify_delete"}
+                      onchange={() => handleAdoptionDefaultChange("move_verify_delete")}
+                      disabled={settingsBusy}
+                    />
+                    Move, verify, optional delete
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <button
+              class="mt-4 w-full rounded-xl border border-slate-400/30 px-4 py-2 text-sm font-semibold text-slate-100"
+              onclick={handleRerunOnboarding}
+              disabled={settingsBusy}
+            >
+              Re-run onboarding
+            </button>
+          {/if}
         </div>
       </aside>
 

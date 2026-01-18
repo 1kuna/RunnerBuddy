@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type RunnerStatus = "offline" | "idle" | "running";
 
+export type AdoptionDefault = "adopt" | "move_verify_delete";
+
 export type RunnerScope =
   | { type: "repo"; owner: string; repo: string }
   | { type: "org"; org: string }
@@ -47,10 +49,23 @@ export interface RunnerProfile {
   last_seen_at?: string | null;
 }
 
+export interface OnboardingConfig {
+  completed: boolean;
+  completed_at?: string | null;
+}
+
+export interface SettingsConfig {
+  auto_updates_enabled: boolean;
+  auto_check_updates_on_launch: boolean;
+  adoption_default: AdoptionDefault;
+}
+
 export interface Config {
   schema_version: number;
   selected_runner_id?: string | null;
   pat_default_alias: string;
+  onboarding: OnboardingConfig;
+  settings: SettingsConfig;
   runners: RunnerProfile[];
 }
 
@@ -64,6 +79,11 @@ export interface RuntimeState {
 export interface AppSnapshot {
   config: Config;
   runtime: Record<string, RuntimeState>;
+}
+
+export interface SettingsSnapshot {
+  onboarding: OnboardingConfig;
+  settings: SettingsConfig;
 }
 
 export interface ServiceStatus {
@@ -111,6 +131,24 @@ export async function getState(): Promise<AppSnapshot> {
 
 export async function runnersList(): Promise<AppSnapshot> {
   return invoke("runners_list");
+}
+
+export async function getSettings(): Promise<SettingsSnapshot> {
+  return invoke("settings_get");
+}
+
+export async function updateSettings(
+  patch: Partial<SettingsConfig>
+): Promise<SettingsSnapshot> {
+  return invoke("settings_update", { patch });
+}
+
+export async function completeOnboarding(): Promise<SettingsSnapshot> {
+  return invoke("onboarding_complete");
+}
+
+export async function resetOnboarding(): Promise<SettingsSnapshot> {
+  return invoke("onboarding_reset");
 }
 
 export async function createRunnerProfile(params: {
@@ -258,6 +296,13 @@ export async function discoverImport(
   options: { replace_service: boolean; move_install: boolean; verify_after_move?: boolean; delete_original_after_verify?: boolean }
 ): Promise<string> {
   return invoke("discover_import", { candidateId, options });
+}
+
+export async function discoverAdopt(
+  candidateId: string,
+  options: { strategy: AdoptionDefault; replace_service: boolean; delete_original_after_verify?: boolean }
+): Promise<string> {
+  return invoke("discover_adopt", { candidateId, options });
 }
 
 export async function discoverMigrateService(

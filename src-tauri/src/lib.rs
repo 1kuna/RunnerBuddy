@@ -11,8 +11,8 @@ mod state;
 mod util;
 
 use crate::config::{
-    default_install_path, default_runner_labels, default_work_dir, now_iso8601, Config, InstallMode,
-    RunnerProfile, RunnerScope,
+    default_install_path, default_runner_labels, default_work_dir, now_iso8601, AdoptionDefault,
+    Config, InstallMode, OnboardingConfig, RunnerProfile, RunnerScope, SettingsConfig,
 };
 use crate::errors::{AppError, AppResult, Error};
 use crate::service_mgmt::ServiceStatus;
@@ -51,6 +51,27 @@ struct RunnerStatusPayload {
 struct VerifyResult {
     ok: bool,
     reason: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct SettingsSnapshot {
+    onboarding: OnboardingConfig,
+    settings: SettingsConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct SettingsPatch {
+    auto_updates_enabled: Option<bool>,
+    auto_check_updates_on_launch: Option<bool>,
+    adoption_default: Option<AdoptionDefault>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdoptOptions {
+    strategy: AdoptionDefault,
+    replace_service: bool,
+    #[serde(default)]
+    delete_original_after_verify: bool,
 }
 
 fn update_runtime(
@@ -235,6 +256,84 @@ async fn app_get_state(state: State<'_, AppState>) -> AppResult<AppSnapshot> {
 #[tauri::command]
 async fn runners_list(state: State<'_, AppState>) -> AppResult<AppSnapshot> {
     app_get_state(state).await
+}
+
+#[tauri::command]
+async fn settings_get(state: State<'_, AppState>) -> AppResult<SettingsSnapshot> {
+    let config = state.config.get();
+    Ok(SettingsSnapshot {
+        onboarding: config.onboarding,
+        settings: config.settings,
+    })
+}
+
+#[tauri::command]
+async fn settings_update(
+    state: State<'_, AppState>,
+    patch: SettingsPatch,
+) -> AppResult<SettingsSnapshot> {
+    let updated = state
+        .config
+        .update(|config| {
+            if let Some(value) = patch.auto_updates_enabled {
+                config.settings.auto_updates_enabled = value;
+                if !value {
+                    config.settings.auto_check_updates_on_launch = false;
+                }
+            }
+            if let Some(value) = patch.auto_check_updates_on_launch {
+                if config.settings.auto_updates_enabled {
+                    config.settings.auto_check_updates_on_launch = value;
+                }
+            }
+            if let Some(value) = patch.adoption_default {
+                config.settings.adoption_default = value;
+            }
+        })
+        .map_err(AppError::from)?;
+    info!(
+        "Settings updated: auto_updates_enabled={}, auto_check_on_launch={}, adoption_default={:?}",
+        updated.settings.auto_updates_enabled,
+        updated.settings.auto_check_updates_on_launch,
+        updated.settings.adoption_default
+    );
+    Ok(SettingsSnapshot {
+        onboarding: updated.onboarding,
+        settings: updated.settings,
+    })
+}
+
+#[tauri::command]
+async fn onboarding_complete(state: State<'_, AppState>) -> AppResult<SettingsSnapshot> {
+    let completed_at = now_iso8601();
+    let updated = state
+        .config
+        .update(|config| {
+            config.onboarding.completed = true;
+            config.onboarding.completed_at = Some(completed_at.clone());
+        })
+        .map_err(AppError::from)?;
+    info!("Onboarding marked complete");
+    Ok(SettingsSnapshot {
+        onboarding: updated.onboarding,
+        settings: updated.settings,
+    })
+}
+
+#[tauri::command]
+async fn onboarding_reset(state: State<'_, AppState>) -> AppResult<SettingsSnapshot> {
+    let updated = state
+        .config
+        .update(|config| {
+            config.onboarding.completed = false;
+            config.onboarding.completed_at = None;
+        })
+        .map_err(AppError::from)?;
+    info!("Onboarding reset");
+    Ok(SettingsSnapshot {
+        onboarding: updated.onboarding,
+        settings: updated.settings,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -803,6 +902,22 @@ async fn discover_import(
 }
 
 #[tauri::command]
+async fn discover_adopt(
+    state: State<'_, AppState>,
+    candidate_id: String,
+    options: AdoptOptions,
+) -> AppResult<String> {
+    let move_install = options.strategy == AdoptionDefault::MoveVerifyDelete;
+    let import_options = discovery::ImportOptions {
+        replace_service: options.replace_service,
+        move_install,
+        verify_after_move: move_install,
+        delete_original_after_verify: move_install && options.delete_original_after_verify,
+    };
+    discover_import(state, candidate_id, import_options).await
+}
+
+#[tauri::command]
 async fn discover_migrate_service(
     state: State<'_, AppState>,
     runner_id: String,
@@ -1086,6 +1201,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_get_state,
             runners_list,
+            settings_get,
+            settings_update,
+            onboarding_complete,
+            onboarding_reset,
             runners_create_profile,
             runners_update_profile,
             runners_delete_profile,
@@ -1112,6 +1231,7 @@ pub fn run() {
             logs_tail,
             discover_scan,
             discover_import,
+            discover_adopt,
             discover_migrate_service,
             discover_remove_external_artifacts,
             discover_verify_runner,

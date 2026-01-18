@@ -11,6 +11,19 @@ use uuid::Uuid;
 
 const SCHEMA_VERSION: u32 = 3;
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdoptionDefault {
+    Adopt,
+    MoveVerifyDelete,
+}
+
+impl Default for AdoptionDefault {
+    fn default() -> Self {
+        AdoptionDefault::Adopt
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthMethod {
@@ -158,6 +171,39 @@ pub struct RunnerProfile {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OnboardingConfig {
+    pub completed: bool,
+    #[serde(default)]
+    pub completed_at: Option<String>,
+}
+
+impl OnboardingConfig {
+    fn completed_for_upgrade() -> Self {
+        Self {
+            completed: true,
+            completed_at: None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SettingsConfig {
+    pub auto_updates_enabled: bool,
+    pub auto_check_updates_on_launch: bool,
+    pub adoption_default: AdoptionDefault,
+}
+
+impl Default for SettingsConfig {
+    fn default() -> Self {
+        Self {
+            auto_updates_enabled: true,
+            auto_check_updates_on_launch: true,
+            adoption_default: AdoptionDefault::Adopt,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
@@ -165,6 +211,10 @@ pub struct Config {
     pub selected_runner_id: Option<String>,
     #[serde(default = "default_pat_alias")]
     pub pat_default_alias: String,
+    #[serde(default = "default_onboarding")]
+    pub onboarding: OnboardingConfig,
+    #[serde(default = "default_settings")]
+    pub settings: SettingsConfig,
     #[serde(default)]
     pub runners: Vec<RunnerProfile>,
 }
@@ -177,12 +227,25 @@ fn default_pat_alias() -> String {
     "default".to_string()
 }
 
+fn default_onboarding() -> OnboardingConfig {
+    OnboardingConfig {
+        completed: false,
+        completed_at: None,
+    }
+}
+
+fn default_settings() -> SettingsConfig {
+    SettingsConfig::default()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
             selected_runner_id: None,
             pat_default_alias: default_pat_alias(),
+            onboarding: default_onboarding(),
+            settings: default_settings(),
             runners: Vec::new(),
         }
     }
@@ -235,6 +298,8 @@ impl Config {
             schema_version: SCHEMA_VERSION,
             selected_runner_id: Some(runner_id),
             pat_default_alias: default_pat_alias(),
+            onboarding: OnboardingConfig::completed_for_upgrade(),
+            settings: SettingsConfig::default(),
             runners: vec![profile],
         })
     }
@@ -326,8 +391,8 @@ impl ConfigStore {
                 .get("schema_version")
                 .and_then(|val| val.as_u64())
                 .unwrap_or(1) as u32;
-            if schema_version == 1 {
-                let legacy: LegacyConfig = serde_json::from_value(value)?;
+            let mut config = if schema_version == 1 {
+                let legacy: LegacyConfig = serde_json::from_value(value.clone())?;
                 needs_save = true;
                 Config::migrate_from_legacy(legacy)?
             } else if schema_version < SCHEMA_VERSION {
@@ -337,8 +402,14 @@ impl ConfigStore {
                 needs_save = true;
                 config
             } else {
-                serde_json::from_value(value)?
+                serde_json::from_value(value.clone())?
+            };
+            if schema_version != 1 {
+                if apply_missing_fields(&mut config, &value) {
+                    needs_save = true;
+                }
             }
+            config
         } else {
             Config::default()
         };
@@ -405,6 +476,19 @@ fn migrate_external_hint(config: &mut Config, value: &serde_json::Value) {
     }
 }
 
+fn apply_missing_fields(config: &mut Config, value: &serde_json::Value) -> bool {
+    let mut updated = false;
+    if value.get("onboarding").is_none() {
+        config.onboarding = OnboardingConfig::completed_for_upgrade();
+        updated = true;
+    }
+    if value.get("settings").is_none() {
+        config.settings = SettingsConfig::default();
+        updated = true;
+    }
+    updated
+}
+
 pub fn data_dir() -> Result<PathBuf, Error> {
     let dirs = project_dirs()?;
     Ok(dirs.data_dir().to_path_buf())
@@ -456,6 +540,43 @@ mod tests {
         let json = serde_json::to_string(&config).expect("serialize config");
         let decoded: Config = serde_json::from_str(&json).expect("deserialize config");
         assert_eq!(decoded.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn default_config_onboarding_incomplete() {
+        let config = Config::default();
+        assert!(!config.onboarding.completed);
+        assert!(config.onboarding.completed_at.is_none());
+    }
+
+    #[test]
+    fn apply_missing_fields_marks_onboarding_complete() {
+        let mut config = Config::default();
+        let value = serde_json::json!({
+            "schema_version": SCHEMA_VERSION
+        });
+        assert!(apply_missing_fields(&mut config, &value));
+        assert!(config.onboarding.completed);
+        assert!(config.settings.auto_updates_enabled);
+    }
+
+    #[test]
+    fn apply_missing_fields_respects_existing_settings() {
+        let mut config = Config::default();
+        config.onboarding.completed = false;
+        config.settings.auto_updates_enabled = false;
+        let value = serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "onboarding": { "completed": false, "completed_at": null },
+            "settings": {
+                "auto_updates_enabled": false,
+                "auto_check_updates_on_launch": false,
+                "adoption_default": "adopt"
+            }
+        });
+        assert!(!apply_missing_fields(&mut config, &value));
+        assert!(!config.onboarding.completed);
+        assert!(!config.settings.auto_updates_enabled);
     }
 
     #[test]
