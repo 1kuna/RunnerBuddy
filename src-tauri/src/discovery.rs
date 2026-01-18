@@ -7,9 +7,12 @@ use crate::errors::Error;
 use crate::runner_mgmt::latest_log_file;
 use crate::service_mgmt;
 use crate::util::default_runner_name;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::collections::HashSet;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "windows")]
 use std::process::Command;
@@ -343,6 +346,37 @@ struct RunnerMetadata {
     work_dir: Option<String>,
 }
 
+pub fn infer_scope_from_install(install_path: &Path) -> Option<RunnerScope> {
+    let root = parse_runner_metadata(install_path).scope;
+    if root.is_some() {
+        return root;
+    }
+
+    for dir in find_runner_dirs_with_metadata(install_path) {
+        let scope = parse_runner_metadata(&dir).scope;
+        if scope.is_some() {
+            return scope;
+        }
+    }
+
+    for file in candidate_metadata_files(install_path) {
+        let content = read_file_tail(&file, 1024 * 1024).unwrap_or_default();
+        if let Some(scope) = scope_from_text(&content) {
+            return Some(scope);
+        }
+    }
+
+    let log_dir = install_path.join("_diag");
+    if let Ok(Some(path)) = latest_log_file(&log_dir) {
+        let content = read_file_tail(&path, 1024 * 1024).unwrap_or_default();
+        if let Some(scope) = scope_from_text(&content) {
+            return Some(scope);
+        }
+    }
+
+    None
+}
+
 fn parse_runner_metadata(path: &Path) -> RunnerMetadata {
     let runner_file = path.join(".runner");
     if !runner_file.exists() {
@@ -418,9 +452,25 @@ fn scope_from_url(url: &str) -> Option<RunnerScope> {
     if segments.is_empty() {
         return None;
     }
+    if segments.get(0) == Some(&"organizations") && segments.len() >= 2 {
+        return Some(RunnerScope::Org {
+            org: segments[1].to_string(),
+        });
+    }
+    if segments.get(0) == Some(&"orgs") && segments.len() >= 2 {
+        return Some(RunnerScope::Org {
+            org: segments[1].to_string(),
+        });
+    }
     if segments.get(0) == Some(&"enterprises") && segments.len() >= 2 {
         return Some(RunnerScope::Enterprise {
             enterprise: segments[1].to_string(),
+        });
+    }
+    if segments.get(0) == Some(&"repos") && segments.len() >= 3 {
+        return Some(RunnerScope::Repo {
+            owner: segments[1].to_string(),
+            repo: segments[2].to_string(),
         });
     }
     if segments.len() >= 2 {
@@ -433,6 +483,79 @@ fn scope_from_url(url: &str) -> Option<RunnerScope> {
         return Some(RunnerScope::Org {
             org: segments[0].to_string(),
         });
+    }
+    None
+}
+
+fn find_runner_dirs_with_metadata(root: &Path) -> Vec<PathBuf> {
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let mut results = Vec::new();
+    let mut queue = VecDeque::from([(root.to_path_buf(), 0usize)]);
+    while let Some((dir, depth)) = queue.pop_front() {
+        if depth > 4 {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                queue.push_back((path, depth + 1));
+                continue;
+            }
+            if file_type.is_file() && entry.file_name() == ".runner" {
+                if let Some(parent) = path.parent() {
+                    results.push(parent.to_path_buf());
+                }
+            }
+        }
+    }
+    results
+}
+
+fn candidate_metadata_files(install_path: &Path) -> Vec<PathBuf> {
+    let names = [
+        ".runner",
+        ".credentials",
+        ".credentials_rsaparams",
+        ".env",
+        ".envs",
+    ];
+    names
+        .iter()
+        .map(|name| install_path.join(name))
+        .filter(|path| path.exists() && path.is_file())
+        .collect()
+}
+
+fn read_file_tail(path: &Path, max_bytes: usize) -> Option<String> {
+    let mut file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(max_bytes as u64);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).to_string())
+}
+
+fn scope_from_text(text: &str) -> Option<RunnerScope> {
+    let Ok(regex) = Regex::new(r#"https?://[^\s"']+"#) else {
+        return None;
+    };
+    for match_ in regex.find_iter(text) {
+        let url = match_.as_str();
+        if url.contains("githubusercontent.com") || url.contains("actions.githubusercontent.com") {
+            continue;
+        }
+        if let Some(scope) = scope_from_url(url) {
+            return Some(scope);
+        }
     }
     None
 }
@@ -651,6 +774,31 @@ mod tests {
             RunnerScope::Repo { owner, repo } => {
                 assert_eq!(owner, "org");
                 assert_eq!(repo, "repo");
+            }
+            _ => panic!("unexpected scope"),
+        }
+    }
+
+    #[test]
+    fn scope_from_api_repo_url() {
+        let scope = scope_from_url("https://api.github.com/repos/org/repo").expect("scope");
+        match scope {
+            RunnerScope::Repo { owner, repo } => {
+                assert_eq!(owner, "org");
+                assert_eq!(repo, "repo");
+            }
+            _ => panic!("unexpected scope"),
+        }
+    }
+
+    #[test]
+    fn scope_from_org_settings_url() {
+        let scope =
+            scope_from_url("https://github.com/organizations/acme/settings/actions/runners")
+                .expect("scope");
+        match scope {
+            RunnerScope::Org { org } => {
+                assert_eq!(org, "acme");
             }
             _ => panic!("unexpected scope"),
         }

@@ -9,6 +9,31 @@ export type RunnerScope =
   | { type: "org"; org: string }
   | { type: "enterprise"; enterprise: string };
 
+export interface GitHubRegistrationToken {
+  token: string;
+  expires_at: string;
+}
+
+export interface GitHubRepoPermissions {
+  admin: boolean;
+  push: boolean;
+  pull: boolean;
+}
+
+export interface GitHubRepoInfo {
+  owner: string;
+  repo: string;
+  name_with_owner: string;
+  url: string;
+  private: boolean;
+  permissions?: GitHubRepoPermissions | null;
+}
+
+export interface GitHubOrgInfo {
+  org: string;
+  url: string;
+}
+
 export type InstallMode = "managed" | "adopted";
 
 export type ServiceProvider = "runnerbuddy" | "external" | "unknown";
@@ -191,6 +216,10 @@ export async function savePat(alias: string, pat: string): Promise<void> {
   return invoke("auth_save_pat", { alias, pat });
 }
 
+export async function importGhToken(alias: string): Promise<void> {
+  return invoke("auth_import_gh_token", { alias });
+}
+
 export async function clearPat(alias: string): Promise<void> {
   return invoke("auth_clear_pat", { alias });
 }
@@ -201,6 +230,25 @@ export async function checkPat(alias: string): Promise<boolean> {
 
 export async function setDefaultPatAlias(alias: string): Promise<void> {
   return invoke("auth_set_default_alias", { alias });
+}
+
+export async function githubGetRegistrationToken(
+  scope: RunnerScope,
+  alias: string
+): Promise<GitHubRegistrationToken> {
+  return invoke("github_get_registration_token", { scope, alias });
+}
+
+export async function githubListRepos(alias: string): Promise<GitHubRepoInfo[]> {
+  return invoke("github_list_repos", { alias });
+}
+
+export async function githubListOrgs(alias: string): Promise<GitHubOrgInfo[]> {
+  return invoke("github_list_orgs", { alias });
+}
+
+export async function repairRunnerScope(runnerId: string): Promise<RunnerProfile> {
+  return invoke("runner_repair_scope", { runnerId });
 }
 
 export async function downloadRunner(

@@ -4,6 +4,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { getVersion } from "@tauri-apps/api/app";
   import { check } from "@tauri-apps/plugin-updater";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { relaunch } from "@tauri-apps/plugin-process";
   import { formatError } from "$lib/errors";
   import {
@@ -26,11 +27,16 @@
     fetchServiceStatus,
     fetchServiceStatusAll,
     getSettings,
+    githubGetRegistrationToken,
+    githubListOrgs,
+    githubListRepos,
+    repairRunnerScope,
     installService,
     listLogSources,
     runnersList,
     resetOnboarding,
     savePat,
+    importGhToken,
     selectRunner,
     setDefaultPatAlias,
     setRunOnBoot,
@@ -42,6 +48,8 @@
     type AdoptionDefault,
     type AppSnapshot,
     type DiscoveryCandidate,
+    type GitHubOrgInfo,
+    type GitHubRepoInfo,
     type LogLine,
     type LogSource,
     type ProgressPayload,
@@ -89,6 +97,27 @@
   let runnerLabels = $state("");
   let workDir = $state("");
 
+  let repoOptions = $state<GitHubRepoInfo[]>([]);
+  let repoFilter = $state("");
+  let repoAdminOnly = $state(true);
+  let reposBusy = $state(false);
+  let reposError = $state<string | null>(null);
+
+  let orgOptions = $state<GitHubOrgInfo[]>([]);
+  let orgFilter = $state("");
+  let orgsBusy = $state(false);
+  let orgsError = $state<string | null>(null);
+
+  let registrationToken = $state<string | null>(null);
+  let registrationTokenExpiresAt = $state<string | null>(null);
+  let tokenBusy = $state(false);
+  let tokenError = $state<string | null>(null);
+
+  let showManualScopeRepair = $state(false);
+
+  let cleanupMode = $state<"configonly" | "localdelete" | "unregisteranddelete" | null>(null);
+  let cleanupConfirmInput = $state("");
+
   let discoveryCandidates = $state<DiscoveryCandidate[]>([]);
   let isScanning = $state(false);
 
@@ -109,7 +138,7 @@
   let adoptionDefault = $state<AdoptionDefault>("adopt");
 
   const stepTitles = [
-    "Save access token",
+    "Connect to GitHub",
     "Select scope",
     "Runner settings",
     "Download & configure",
@@ -278,8 +307,47 @@
       patValid = await checkPat(patAlias);
       if (patValid) {
         await setDefaultPatAlias(patAlias);
+        patInput = "";
         wizardStep = 2;
       }
+    } catch (error) {
+      errorMessage = formatError(error);
+    } finally {
+      isBusy = false;
+    }
+  }
+
+  async function handleValidateSavedPat() {
+    errorMessage = null;
+    isBusy = true;
+    try {
+      patValid = await checkPat(patAlias);
+      if (!patValid) {
+        errorMessage = "No saved token found for this alias (or it is invalid).";
+        return;
+      }
+      await setDefaultPatAlias(patAlias);
+      wizardStep = 2;
+    } catch (error) {
+      errorMessage = formatError(error);
+    } finally {
+      isBusy = false;
+    }
+  }
+
+  async function handleImportGhToken() {
+    errorMessage = null;
+    isBusy = true;
+    try {
+      await importGhToken(patAlias);
+      patValid = await checkPat(patAlias);
+      if (!patValid) {
+        errorMessage = "GitHub CLI token was imported but could not be validated.";
+        return;
+      }
+      await setDefaultPatAlias(patAlias);
+      patInput = "";
+      wizardStep = 2;
     } catch (error) {
       errorMessage = formatError(error);
     } finally {
@@ -291,6 +359,167 @@
     await clearPat(patAlias);
     patValid = false;
     patInput = "";
+  }
+
+  function scopeIsComplete(): boolean {
+    if (scopeType === "repo") {
+      return !!scopeOwner.trim() && !!scopeRepo.trim();
+    }
+    if (scopeType === "org") {
+      return !!scopeOrg.trim();
+    }
+    return !!scopeEnterprise.trim();
+  }
+
+  function clearScopeHelpers() {
+    registrationToken = null;
+    registrationTokenExpiresAt = null;
+    tokenError = null;
+  }
+
+  function runnersSettingsUrl(): string | null {
+    if (!scopeIsComplete()) return null;
+    if (scopeType === "repo") {
+      return `https://github.com/${scopeOwner.trim()}/${scopeRepo.trim()}/settings/actions/runners`;
+    }
+    if (scopeType === "org") {
+      return `https://github.com/organizations/${scopeOrg.trim()}/settings/actions/runners`;
+    }
+    return `https://github.com/enterprises/${scopeEnterprise.trim()}/settings/actions/runners`;
+  }
+
+  async function handleOpenRunnersSettings() {
+    const url = runnersSettingsUrl();
+    if (!url) return;
+    tokenError = null;
+    try {
+      await openUrl(url);
+    } catch (error) {
+      tokenError = formatError(error);
+    }
+  }
+
+  async function handleFetchRegistrationToken() {
+    if (!scopeIsComplete()) return;
+    clearScopeHelpers();
+    tokenBusy = true;
+    try {
+      const result = await githubGetRegistrationToken(buildScope(), patAlias);
+      registrationToken = result.token;
+      registrationTokenExpiresAt = result.expires_at;
+    } catch (error) {
+      tokenError = formatError(error);
+    } finally {
+      tokenBusy = false;
+    }
+  }
+
+  async function handleCopyRegistrationToken() {
+    if (!registrationToken) return;
+    try {
+      await navigator.clipboard.writeText(registrationToken);
+    } catch (error) {
+      tokenError = formatError(error);
+    }
+  }
+
+  async function handleRepairScope() {
+    if (!selectedRunnerId) return;
+    errorMessage = null;
+    isBusy = true;
+    try {
+      await repairRunnerScope(selectedRunnerId);
+      await refreshState();
+      await refreshSelectedStatus();
+    } catch (error) {
+      errorMessage = formatError(error);
+      if (errorMessage?.includes("unable to infer scope")) {
+        showManualScopeRepair = true;
+      }
+    } finally {
+      isBusy = false;
+    }
+  }
+
+  async function handleSaveScopeForSelectedRunner() {
+    if (!selectedRunnerId) return;
+    if (!scopeIsComplete()) {
+      errorMessage = "Scope is incomplete.";
+      showManualScopeRepair = true;
+      return;
+    }
+    errorMessage = null;
+    isBusy = true;
+    try {
+      await updateRunnerProfile(selectedRunnerId, { scope: buildScope() });
+      await refreshState();
+      await refreshSelectedStatus();
+      showManualScopeRepair = false;
+    } catch (error) {
+      errorMessage = formatError(error);
+    } finally {
+      isBusy = false;
+    }
+  }
+
+  function repoHasAdmin(repo: GitHubRepoInfo): boolean {
+    return repo.permissions?.admin ?? false;
+  }
+
+  function filteredRepos(): GitHubRepoInfo[] {
+    const query = repoFilter.trim().toLowerCase();
+    return repoOptions.filter((repo) => {
+      if (repoAdminOnly && !repoHasAdmin(repo)) return false;
+      if (!query) return true;
+      return (
+        repo.name_with_owner.toLowerCase().includes(query) ||
+        repo.owner.toLowerCase().includes(query) ||
+        repo.repo.toLowerCase().includes(query)
+      );
+    });
+  }
+
+  async function handleLoadRepos() {
+    reposError = null;
+    reposBusy = true;
+    try {
+      repoOptions = await githubListRepos(patAlias);
+    } catch (error) {
+      reposError = formatError(error);
+    } finally {
+      reposBusy = false;
+    }
+  }
+
+  function handleSelectRepo(repo: GitHubRepoInfo) {
+    scopeOwner = repo.owner;
+    scopeRepo = repo.repo;
+    clearScopeHelpers();
+  }
+
+  function filteredOrgs(): GitHubOrgInfo[] {
+    const query = orgFilter.trim().toLowerCase();
+    return orgOptions.filter((org) => {
+      if (!query) return true;
+      return org.org.toLowerCase().includes(query);
+    });
+  }
+
+  async function handleLoadOrgs() {
+    orgsError = null;
+    orgsBusy = true;
+    try {
+      orgOptions = await githubListOrgs(patAlias);
+    } catch (error) {
+      orgsError = formatError(error);
+    } finally {
+      orgsBusy = false;
+    }
+  }
+
+  function handleSelectOrg(org: GitHubOrgInfo) {
+    scopeOrg = org.org;
+    clearScopeHelpers();
   }
 
   async function handleConfigure() {
@@ -359,17 +588,26 @@
 
   async function handleApplySettings() {
     if (!selectedRunnerId) return;
-    const runner = selectedRunner();
-    if (!runner || !runner.scope) {
-      errorMessage = "Runner scope is missing; reconfigure in the setup flow.";
-      return;
-    }
     errorMessage = null;
     isBusy = true;
     try {
+      const runner = selectedRunner();
+      if (!runner) return;
+      let scope = runner.scope;
+      if (!scope) {
+        const repaired = await repairRunnerScope(selectedRunnerId);
+        scope = repaired.scope;
+        await refreshState();
+      }
+      if (!scope) {
+        errorMessage =
+          "Runner scope is missing and could not be repaired automatically. Re-run configuration to set scope.";
+        showManualScopeRepair = true;
+        return;
+      }
       await configureRunner({
         runnerId: selectedRunnerId,
-        scope: runner.scope,
+        scope,
         name: runnerName.trim(),
         labels: labelsArray(),
         workDir: workDir.trim(),
@@ -409,24 +647,55 @@
     }
   }
 
-  async function handleCleanup(mode: "configonly" | "localdelete" | "unregisteranddelete") {
-    if (!selectedRunnerId) return;
+  function cleanupPrompt(mode: "configonly" | "localdelete" | "unregisteranddelete"): string {
+    return mode === "configonly"
+      ? "Remove this runner from RunnerBuddy only?"
+      : mode === "localdelete"
+        ? "Remove this runner and delete local files?"
+        : "Unregister the runner on GitHub and delete local files?";
+  }
+
+  function cleanupNeedsTypedConfirm(mode: "configonly" | "localdelete" | "unregisteranddelete"): boolean {
+    return mode !== "configonly";
+  }
+
+  function cleanupExpectedText(): string {
     const runner = selectedRunner();
-    if (mode === "unregisteranddelete" && !runner?.scope) {
-      errorMessage = "Runner scope is missing; cannot unregister from GitHub.";
-      return;
-    }
-    const expected = runner?.display_name || runner?.runner_name || "delete";
-    const prompt =
-      mode === "configonly"
-        ? "Remove this runner from RunnerBuddy only?"
-        : mode === "localdelete"
-          ? "Remove this runner and delete local files?"
-          : "Unregister the runner on GitHub and delete local files?";
-    if (mode === "configonly") {
-      if (!confirm(prompt)) return;
-    } else {
-      if (!requireTypedConfirm(prompt, expected)) return;
+    return runner?.display_name || runner?.runner_name || "delete";
+  }
+
+  function beginCleanup(mode: "configonly" | "localdelete" | "unregisteranddelete") {
+    cleanupMode = mode;
+    cleanupConfirmInput = "";
+  }
+
+  function cancelCleanup() {
+    cleanupMode = null;
+    cleanupConfirmInput = "";
+  }
+
+  async function performCleanup(mode: "configonly" | "localdelete" | "unregisteranddelete") {
+    if (!selectedRunnerId) return;
+    let runner = selectedRunner();
+    if (!runner) return;
+    if (mode === "unregisteranddelete" && !runner.scope) {
+      errorMessage = null;
+      isBusy = true;
+      try {
+        await repairRunnerScope(selectedRunnerId);
+        await refreshState();
+        runner = selectedRunner();
+      } catch (error) {
+        errorMessage = formatError(error);
+        return;
+      } finally {
+        isBusy = false;
+      }
+      if (!runner?.scope) {
+        errorMessage = "Runner scope is missing and could not be repaired automatically.";
+        showManualScopeRepair = true;
+        return;
+      }
     }
     errorMessage = null;
     isBusy = true;
@@ -434,11 +703,24 @@
       await deleteRunnerProfile(selectedRunnerId, mode);
       await refreshState();
       selectedRunnerId = snapshot?.config.selected_runner_id ?? null;
+      cancelCleanup();
     } catch (error) {
       errorMessage = formatError(error);
     } finally {
       isBusy = false;
     }
+  }
+
+  async function confirmCleanup() {
+    if (!cleanupMode) return;
+    if (cleanupNeedsTypedConfirm(cleanupMode)) {
+      const expected = cleanupExpectedText();
+      if (cleanupConfirmInput !== expected) {
+        errorMessage = `Type \"${expected}\" to confirm.`;
+        return;
+      }
+    }
+    await performCleanup(cleanupMode);
   }
 
   async function handleScan() {
@@ -1061,7 +1343,7 @@
               <div class="space-y-6">
                 {#if wizardStep === 1}
                   <div class="space-y-4">
-                    <h3 class="text-lg font-semibold">Save personal access token</h3>
+                    <h3 class="text-lg font-semibold">Connect to GitHub</h3>
                     <p class="text-sm text-slate-300">
                       Tokens are stored in the OS credential store. Choose a label so you can reuse it.
                     </p>
@@ -1077,6 +1359,12 @@
                       placeholder="ghp_..."
                       bind:value={patInput}
                     />
+                    <p class="text-xs text-slate-400">
+                      Already saved one? Leave the token blank and click “Validate saved token”.
+                    </p>
+                    <p class="text-xs text-slate-400">
+                      Prefer GitHub CLI? Install `gh`, run `gh auth login`, then click “Import from GitHub CLI”.
+                    </p>
                     <div class="flex flex-wrap gap-3">
                       <button
                         class="rounded-xl bg-tide-500 px-4 py-2 text-sm font-semibold text-white"
@@ -1084,6 +1372,20 @@
                         disabled={isBusy || !patInput || !patAlias.trim()}
                       >
                         Save & validate
+                      </button>
+                      <button
+                        class="rounded-xl border border-slate-500/40 px-4 py-2 text-sm font-semibold text-slate-200"
+                        onclick={handleImportGhToken}
+                        disabled={isBusy || !patAlias.trim()}
+                      >
+                        Import from GitHub CLI
+                      </button>
+                      <button
+                        class="rounded-xl border border-slate-500/40 px-4 py-2 text-sm font-semibold text-slate-200"
+                        onclick={handleValidateSavedPat}
+                        disabled={isBusy || !patAlias.trim()}
+                      >
+                        Validate saved token
                       </button>
                       <button
                         class="rounded-xl border border-slate-500/40 px-4 py-2 text-sm font-semibold text-slate-200"
@@ -1109,7 +1411,10 @@
                             ? "border-tide-400 bg-tide-500/20 text-white"
                             : "border-slate-500/40 text-slate-200"
                         }`}
-                        onclick={() => (scopeType = "repo")}
+                        onclick={() => {
+                          scopeType = "repo";
+                          clearScopeHelpers();
+                        }}
                       >
                         Repo
                       </button>
@@ -1119,7 +1424,10 @@
                             ? "border-tide-400 bg-tide-500/20 text-white"
                             : "border-slate-500/40 text-slate-200"
                         }`}
-                        onclick={() => (scopeType = "org")}
+                        onclick={() => {
+                          scopeType = "org";
+                          clearScopeHelpers();
+                        }}
                       >
                         Org
                       </button>
@@ -1129,7 +1437,10 @@
                             ? "border-tide-400 bg-tide-500/20 text-white"
                             : "border-slate-500/40 text-slate-200"
                         }`}
-                        onclick={() => (scopeType = "enterprise")}
+                        onclick={() => {
+                          scopeType = "enterprise";
+                          clearScopeHelpers();
+                        }}
                       >
                         Enterprise
                       </button>
@@ -1148,6 +1459,59 @@
                           bind:value={scopeRepo}
                         />
                       </div>
+
+                      <div class="rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-3">
+                        <div class="flex flex-wrap items-center justify-between gap-3">
+                          <p class="text-xs text-slate-300">Pick from your repos</p>
+                          <button
+                            class="rounded-lg border border-slate-400/40 px-3 py-1 text-xs font-semibold text-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
+                            onclick={handleLoadRepos}
+                            disabled={reposBusy || isBusy}
+                          >
+                            {reposBusy ? "Loading..." : repoOptions.length ? "Refresh" : "Load repos"}
+                          </button>
+                        </div>
+                        {#if reposError}
+                          <p class="mt-2 text-xs text-red-200">{reposError}</p>
+                        {/if}
+                        {#if repoOptions.length}
+                          {@const visibleRepos = filteredRepos()}
+                          <div class="mt-3 flex flex-wrap items-center gap-3">
+                            <input
+                              class="w-full rounded-lg border border-slate-500/40 bg-slate-950/20 px-3 py-1 text-xs text-white sm:flex-1"
+                              placeholder="Filter (owner/repo)"
+                              bind:value={repoFilter}
+                            />
+                            <label class="flex items-center gap-2 text-xs text-slate-300">
+                              <input type="checkbox" bind:checked={repoAdminOnly} />
+                              Admin only
+                            </label>
+                            <span class="text-xs text-slate-500">{visibleRepos.length} shown</span>
+                          </div>
+                          <div class="mt-3 max-h-56 overflow-auto rounded-lg border border-slate-500/40">
+                            {#each visibleRepos.slice(0, 200) as repo (repo.name_with_owner)}
+                              <button
+                                class="flex w-full items-center justify-between gap-3 border-b border-slate-500/30 px-3 py-2 text-left text-xs text-slate-100 hover:bg-slate-900/40"
+                                onclick={() => handleSelectRepo(repo)}
+                              >
+                                <span class="min-w-0 flex-1 truncate">{repo.name_with_owner}</span>
+                                <span class="shrink-0 text-slate-400">
+                                  {repo.private ? "private" : "public"}
+                                  {repoHasAdmin(repo) ? " · admin" : ""}
+                                </span>
+                              </button>
+                            {/each}
+                            {#if visibleRepos.length > 200}
+                              <p class="px-3 py-2 text-xs text-slate-500">
+                                Showing first 200 results. Refine the filter to narrow.
+                              </p>
+                            {/if}
+                            {#if visibleRepos.length === 0}
+                              <p class="px-3 py-2 text-xs text-slate-500">No matches.</p>
+                            {/if}
+                          </div>
+                        {/if}
+                      </div>
                     {/if}
 
                     {#if scopeType === "org"}
@@ -1156,6 +1520,52 @@
                         placeholder="org name"
                         bind:value={scopeOrg}
                       />
+
+                      <div class="rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-3">
+                        <div class="flex flex-wrap items-center justify-between gap-3">
+                          <p class="text-xs text-slate-300">Pick from your orgs</p>
+                          <button
+                            class="rounded-lg border border-slate-400/40 px-3 py-1 text-xs font-semibold text-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
+                            onclick={handleLoadOrgs}
+                            disabled={orgsBusy || isBusy}
+                          >
+                            {orgsBusy ? "Loading..." : orgOptions.length ? "Refresh" : "Load orgs"}
+                          </button>
+                        </div>
+                        {#if orgsError}
+                          <p class="mt-2 text-xs text-red-200">{orgsError}</p>
+                        {/if}
+                        {#if orgOptions.length}
+                          {@const visibleOrgs = filteredOrgs()}
+                          <div class="mt-3 flex flex-wrap items-center gap-3">
+                            <input
+                              class="w-full rounded-lg border border-slate-500/40 bg-slate-950/20 px-3 py-1 text-xs text-white sm:flex-1"
+                              placeholder="Filter orgs"
+                              bind:value={orgFilter}
+                            />
+                            <span class="text-xs text-slate-500">{visibleOrgs.length} shown</span>
+                          </div>
+                          <div class="mt-3 max-h-56 overflow-auto rounded-lg border border-slate-500/40">
+                            {#each visibleOrgs.slice(0, 200) as org (org.org)}
+                              <button
+                                class="flex w-full items-center justify-between gap-3 border-b border-slate-500/30 px-3 py-2 text-left text-xs text-slate-100 hover:bg-slate-900/40"
+                                onclick={() => handleSelectOrg(org)}
+                              >
+                                <span class="min-w-0 flex-1 truncate">{org.org}</span>
+                                <span class="shrink-0 text-slate-400">{org.url}</span>
+                              </button>
+                            {/each}
+                            {#if visibleOrgs.length > 200}
+                              <p class="px-3 py-2 text-xs text-slate-500">
+                                Showing first 200 results. Refine the filter to narrow.
+                              </p>
+                            {/if}
+                            {#if visibleOrgs.length === 0}
+                              <p class="px-3 py-2 text-xs text-slate-500">No matches.</p>
+                            {/if}
+                          </div>
+                        {/if}
+                      </div>
                     {/if}
 
                     {#if scopeType === "enterprise"}
@@ -1166,14 +1576,56 @@
                       />
                     {/if}
 
+                    <div class="rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-3">
+                      <p class="text-xs text-slate-300">
+                        RunnerBuddy fetches runner registration tokens automatically during setup, but you can
+                        open the GitHub runners page or fetch a token manually.
+                      </p>
+                      <div class="mt-3 flex flex-wrap gap-3">
+                        <button
+                          class="rounded-lg border border-slate-400/40 px-3 py-1 text-xs font-semibold text-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
+                          onclick={handleOpenRunnersSettings}
+                          disabled={!scopeIsComplete() || isBusy}
+                        >
+                          Open self-hosted runners page
+                        </button>
+                        <button
+                          class="rounded-lg bg-tide-500 px-3 py-1 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                          onclick={handleFetchRegistrationToken}
+                          disabled={!scopeIsComplete() || tokenBusy || isBusy}
+                        >
+                          {tokenBusy ? "Fetching..." : "Fetch registration token"}
+                        </button>
+                      </div>
+                      {#if tokenError}
+                        <p class="mt-2 text-xs text-red-200">{tokenError}</p>
+                      {/if}
+                      {#if registrationToken}
+                        <div class="mt-3 space-y-2">
+                          <p class="text-xs text-slate-400">
+                            Token expires at {registrationTokenExpiresAt ?? "unknown"}
+                          </p>
+                          <div class="flex flex-wrap items-center gap-3">
+                            <input
+                              class="w-full flex-1 rounded-lg border border-slate-500/40 bg-slate-950/20 px-3 py-1 font-mono text-xs text-white"
+                              readonly
+                              value={registrationToken}
+                            />
+                            <button
+                              class="rounded-lg border border-slate-400/40 px-3 py-1 text-xs font-semibold text-slate-200"
+                              onclick={handleCopyRegistrationToken}
+                            >
+                              Copy
+                            </button>
+                          </div>
+                        </div>
+                      {/if}
+                    </div>
+
                     <button
                       class="rounded-xl bg-tide-500 px-4 py-2 text-sm font-semibold text-white"
                       onclick={() => (wizardStep = 3)}
-                      disabled={
-                        (scopeType === "repo" && (!scopeOwner.trim() || !scopeRepo.trim())) ||
-                        (scopeType === "org" && !scopeOrg.trim()) ||
-                        (scopeType === "enterprise" && !scopeEnterprise.trim())
-                      }
+                      disabled={!scopeIsComplete()}
                     >
                       Continue
                     </button>
@@ -1508,15 +1960,218 @@
               <button
                 class="rounded-xl bg-tide-500 px-4 py-2 text-sm font-semibold text-white"
                 onclick={handleApplySettings}
-                disabled={isBusy || !selectedRunner()?.scope}
+                disabled={isBusy}
               >
                 Apply changes
               </button>
             </div>
             {#if !selectedRunner()?.scope}
-              <p class="mt-3 text-xs text-amber-200">
-                Scope is missing for this runner. Re-run configuration to set scope before applying changes.
-              </p>
+              <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
+                <p class="text-xs text-amber-200">
+                  Scope is missing for this runner. RunnerBuddy can usually infer it from the local runner install.
+                </p>
+                <div class="flex flex-wrap gap-2">
+                  <button
+                    class="rounded-lg border border-slate-400/50 px-3 py-1 text-xs font-semibold text-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
+                    onclick={handleRepairScope}
+                    disabled={isBusy}
+                  >
+                    Repair scope
+                  </button>
+                  <button
+                    class="rounded-lg border border-slate-400/50 px-3 py-1 text-xs font-semibold text-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
+                    onclick={() => (showManualScopeRepair = !showManualScopeRepair)}
+                    disabled={isBusy}
+                  >
+                    {showManualScopeRepair ? "Hide scope picker" : "Set scope manually"}
+                  </button>
+                </div>
+              </div>
+              {#if showManualScopeRepair}
+                <div class="mt-4 space-y-4 rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-4">
+                  <p class="text-xs text-slate-300">
+                    Choose the repo/org/enterprise this runner is registered to, then save it to the runner profile.
+                  </p>
+                  <div class="grid gap-3 sm:grid-cols-3">
+                    <button
+                      class={`rounded-xl border px-4 py-2 text-sm ${
+                        scopeType === "repo"
+                          ? "border-tide-400 bg-tide-500/20 text-white"
+                          : "border-slate-500/40 text-slate-200"
+                      }`}
+                      onclick={() => {
+                        scopeType = "repo";
+                        clearScopeHelpers();
+                      }}
+                    >
+                      Repo
+                    </button>
+                    <button
+                      class={`rounded-xl border px-4 py-2 text-sm ${
+                        scopeType === "org"
+                          ? "border-tide-400 bg-tide-500/20 text-white"
+                          : "border-slate-500/40 text-slate-200"
+                      }`}
+                      onclick={() => {
+                        scopeType = "org";
+                        clearScopeHelpers();
+                      }}
+                    >
+                      Org
+                    </button>
+                    <button
+                      class={`rounded-xl border px-4 py-2 text-sm ${
+                        scopeType === "enterprise"
+                          ? "border-tide-400 bg-tide-500/20 text-white"
+                          : "border-slate-500/40 text-slate-200"
+                      }`}
+                      onclick={() => {
+                        scopeType = "enterprise";
+                        clearScopeHelpers();
+                      }}
+                    >
+                      Enterprise
+                    </button>
+                  </div>
+
+                  {#if scopeType === "repo"}
+                    <div class="grid gap-3 sm:grid-cols-2">
+                      <input
+                        class="w-full rounded-xl border border-slate-500/40 bg-slate-950/20 px-4 py-2 text-sm text-white"
+                        placeholder="owner"
+                        bind:value={scopeOwner}
+                      />
+                      <input
+                        class="w-full rounded-xl border border-slate-500/40 bg-slate-950/20 px-4 py-2 text-sm text-white"
+                        placeholder="repo"
+                        bind:value={scopeRepo}
+                      />
+                    </div>
+
+                    <div class="rounded-xl border border-slate-500/40 bg-slate-950/20 px-4 py-3">
+                      <div class="flex flex-wrap items-center justify-between gap-3">
+                        <p class="text-xs text-slate-300">Pick from your repos</p>
+                        <button
+                          class="rounded-lg border border-slate-400/40 px-3 py-1 text-xs font-semibold text-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
+                          onclick={handleLoadRepos}
+                          disabled={reposBusy || isBusy}
+                        >
+                          {reposBusy ? "Loading..." : repoOptions.length ? "Refresh" : "Load repos"}
+                        </button>
+                      </div>
+                      {#if reposError}
+                        <p class="mt-2 text-xs text-red-200">{reposError}</p>
+                      {/if}
+                      {#if repoOptions.length}
+                        {@const visibleRepos = filteredRepos()}
+                        <div class="mt-3 flex flex-wrap items-center gap-3">
+                          <input
+                            class="w-full rounded-lg border border-slate-500/40 bg-slate-950/10 px-3 py-1 text-xs text-white sm:flex-1"
+                            placeholder="Filter (owner/repo)"
+                            bind:value={repoFilter}
+                          />
+                          <label class="flex items-center gap-2 text-xs text-slate-300">
+                            <input type="checkbox" bind:checked={repoAdminOnly} />
+                            Admin only
+                          </label>
+                          <span class="text-xs text-slate-500">{visibleRepos.length} shown</span>
+                        </div>
+                        <div class="mt-3 max-h-48 overflow-auto rounded-lg border border-slate-500/40">
+                          {#each visibleRepos.slice(0, 200) as repo (repo.name_with_owner)}
+                            <button
+                              class="flex w-full items-center justify-between gap-3 border-b border-slate-500/30 px-3 py-2 text-left text-xs text-slate-100 hover:bg-slate-900/40"
+                              onclick={() => handleSelectRepo(repo)}
+                            >
+                              <span class="min-w-0 flex-1 truncate">{repo.name_with_owner}</span>
+                              <span class="shrink-0 text-slate-400">
+                                {repo.private ? "private" : "public"}
+                                {repoHasAdmin(repo) ? " · admin" : ""}
+                              </span>
+                            </button>
+                          {/each}
+                          {#if visibleRepos.length === 0}
+                            <p class="px-3 py-2 text-xs text-slate-500">No matches.</p>
+                          {/if}
+                        </div>
+                      {/if}
+                    </div>
+                  {/if}
+
+                  {#if scopeType === "org"}
+                    <input
+                      class="w-full rounded-xl border border-slate-500/40 bg-slate-950/20 px-4 py-2 text-sm text-white"
+                      placeholder="org name"
+                      bind:value={scopeOrg}
+                    />
+
+                    <div class="rounded-xl border border-slate-500/40 bg-slate-950/20 px-4 py-3">
+                      <div class="flex flex-wrap items-center justify-between gap-3">
+                        <p class="text-xs text-slate-300">Pick from your orgs</p>
+                        <button
+                          class="rounded-lg border border-slate-400/40 px-3 py-1 text-xs font-semibold text-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
+                          onclick={handleLoadOrgs}
+                          disabled={orgsBusy || isBusy}
+                        >
+                          {orgsBusy ? "Loading..." : orgOptions.length ? "Refresh" : "Load orgs"}
+                        </button>
+                      </div>
+                      {#if orgsError}
+                        <p class="mt-2 text-xs text-red-200">{orgsError}</p>
+                      {/if}
+                      {#if orgOptions.length}
+                        {@const visibleOrgs = filteredOrgs()}
+                        <div class="mt-3 flex flex-wrap items-center gap-3">
+                          <input
+                            class="w-full rounded-lg border border-slate-500/40 bg-slate-950/10 px-3 py-1 text-xs text-white sm:flex-1"
+                            placeholder="Filter orgs"
+                            bind:value={orgFilter}
+                          />
+                          <span class="text-xs text-slate-500">{visibleOrgs.length} shown</span>
+                        </div>
+                        <div class="mt-3 max-h-48 overflow-auto rounded-lg border border-slate-500/40">
+                          {#each visibleOrgs.slice(0, 200) as org (org.org)}
+                            <button
+                              class="flex w-full items-center justify-between gap-3 border-b border-slate-500/30 px-3 py-2 text-left text-xs text-slate-100 hover:bg-slate-900/40"
+                              onclick={() => handleSelectOrg(org)}
+                            >
+                              <span class="min-w-0 flex-1 truncate">{org.org}</span>
+                              <span class="shrink-0 text-slate-400">{org.url}</span>
+                            </button>
+                          {/each}
+                          {#if visibleOrgs.length === 0}
+                            <p class="px-3 py-2 text-xs text-slate-500">No matches.</p>
+                          {/if}
+                        </div>
+                      {/if}
+                    </div>
+                  {/if}
+
+                  {#if scopeType === "enterprise"}
+                    <input
+                      class="w-full rounded-xl border border-slate-500/40 bg-slate-950/20 px-4 py-2 text-sm text-white"
+                      placeholder="enterprise slug"
+                      bind:value={scopeEnterprise}
+                    />
+                  {/if}
+
+                  <div class="flex flex-wrap gap-3">
+                    <button
+                      class="rounded-xl bg-tide-500 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                      onclick={handleSaveScopeForSelectedRunner}
+                      disabled={isBusy || !scopeIsComplete()}
+                    >
+                      Save scope
+                    </button>
+                    <button
+                      class="rounded-xl border border-slate-500/40 px-4 py-2 text-sm font-semibold text-slate-200"
+                      onclick={() => (showManualScopeRepair = false)}
+                      disabled={isBusy}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              {/if}
             {/if}
             <div class="mt-4 grid gap-3 sm:grid-cols-2">
               <input
@@ -1552,30 +2207,70 @@
             <div class="mt-4 flex flex-wrap gap-3">
               <button
                 class="rounded-xl border border-slate-500/40 px-4 py-2 text-sm font-semibold text-slate-200"
-                onclick={() => handleCleanup("configonly")}
+                onclick={() => beginCleanup("configonly")}
                 disabled={isBusy}
               >
                 Remove from RunnerBuddy
               </button>
               <button
                 class="rounded-xl border border-red-300/40 px-4 py-2 text-sm font-semibold text-red-100"
-                onclick={() => handleCleanup("localdelete")}
+                onclick={() => beginCleanup("localdelete")}
                 disabled={isBusy}
               >
                 Delete local files
               </button>
               <button
                 class="rounded-xl bg-red-500/20 px-4 py-2 text-sm font-semibold text-red-100"
-                onclick={() => handleCleanup("unregisteranddelete")}
-                disabled={isBusy || !selectedRunner()?.scope}
+                onclick={() => beginCleanup("unregisteranddelete")}
+                disabled={isBusy}
               >
                 Unregister & delete
               </button>
             </div>
+            {#if cleanupMode}
+              <div class="mt-4 rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-4">
+                <p class="text-sm text-slate-200">{cleanupPrompt(cleanupMode)}</p>
+                {#if cleanupNeedsTypedConfirm(cleanupMode)}
+                  {@const expected = cleanupExpectedText()}
+                  <p class="mt-2 text-xs text-slate-400">Type “{expected}” to confirm.</p>
+                  <input
+                    class="mt-2 w-full rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-2 text-sm text-white"
+                    placeholder={expected}
+                    bind:value={cleanupConfirmInput}
+                  />
+                {/if}
+                <div class="mt-3 flex flex-wrap gap-3">
+                  <button
+                    class="rounded-xl bg-red-500/20 px-4 py-2 text-sm font-semibold text-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+                    onclick={confirmCleanup}
+                    disabled={
+                      isBusy ||
+                      (cleanupMode && cleanupNeedsTypedConfirm(cleanupMode) && cleanupConfirmInput !== cleanupExpectedText())
+                    }
+                  >
+                    Confirm
+                  </button>
+                  <button
+                    class="rounded-xl border border-slate-500/40 px-4 py-2 text-sm font-semibold text-slate-200"
+                    onclick={cancelCleanup}
+                    disabled={isBusy}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            {/if}
             {#if !selectedRunner()?.scope}
-              <p class="mt-3 text-xs text-amber-200">
-                Scope is missing; unregistering from GitHub is unavailable.
-              </p>
+              <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
+                <p class="text-xs text-amber-200">Scope is missing; unregistering from GitHub may fail.</p>
+                <button
+                  class="rounded-lg border border-slate-400/50 px-3 py-1 text-xs font-semibold text-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
+                  onclick={handleRepairScope}
+                  disabled={isBusy}
+                >
+                  Repair scope
+                </button>
+              </div>
             {/if}
           </div>
 

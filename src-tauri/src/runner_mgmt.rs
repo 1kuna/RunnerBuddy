@@ -3,6 +3,7 @@ use crate::errors::Error;
 use crate::github_api;
 use crate::logging::scrub_sensitive;
 use crate::secrets;
+use crate::discovery;
 use crate::util::expand_path;
 use futures_util::StreamExt;
 use sha2::Digest;
@@ -145,6 +146,42 @@ pub async fn configure_runner(
             runner.labels = labels;
             runner.work_dir = work_dir;
             runner.scope = Some(scope);
+        }
+    })?;
+    Ok(find_runner_in_config(&updated, runner_id)?)
+}
+
+pub fn repair_runner_scope(
+    config_store: &ConfigStore,
+    runner_id: &str,
+) -> Result<RunnerProfile, Error> {
+    let profile = get_runner_profile(config_store, runner_id)?;
+    if profile.scope.is_some() {
+        return Ok(profile);
+    }
+    let install_path = expand_path(&profile.install.install_path);
+    if !install_path.exists() {
+        return Err(Error::Runner(format!(
+            "runner install path does not exist: {}",
+            install_path.to_string_lossy()
+        )));
+    }
+    let scope = discovery::infer_scope_from_install(&install_path).ok_or_else(|| {
+        Error::Runner(
+            "unable to infer scope from local runner install; ensure the runner is configured and `.runner` exists".into(),
+        )
+    })?;
+    info!(
+        "Repaired missing scope for runner {runner_id}: {}",
+        scope.url()
+    );
+    let updated = config_store.update(|config| {
+        if let Some(runner) = config
+            .runners
+            .iter_mut()
+            .find(|runner| runner.runner_id == runner_id)
+        {
+            runner.scope = Some(scope.clone());
         }
     })?;
     Ok(find_runner_in_config(&updated, runner_id)?)

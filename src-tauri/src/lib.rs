@@ -20,6 +20,7 @@ use crate::state::{AppSnapshot, AppState, RunnerStatus, RuntimeState};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{
     menu::MenuBuilder,
@@ -475,6 +476,8 @@ async fn runners_delete_profile(
     runner_id: String,
     mode: RunnerDeleteMode,
 ) -> AppResult<()> {
+    info!("Runner delete requested for {runner_id} ({mode:?})");
+    let runner_id_log = runner_id.clone();
     let profile = get_runner(&state.config.get(), &runner_id).map_err(AppError::from)?;
     let _ = runner_mgmt::stop_runner(&runner_id, &state.runner_children);
     if profile.service.provider == crate::config::ServiceProvider::Runnerbuddy {
@@ -520,6 +523,7 @@ async fn runners_delete_profile(
         },
     );
 
+    info!("Runner delete completed for {runner_id_log}");
     Ok(())
 }
 
@@ -537,10 +541,117 @@ async fn runners_select(
     Ok(())
 }
 
+fn gh_token_from_cli() -> AppResult<String> {
+    let mut candidates = Vec::from(["gh"]);
+    if cfg!(target_os = "macos") {
+        candidates.extend(["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]);
+    } else if cfg!(target_os = "linux") {
+        candidates.extend(["/usr/bin/gh", "/usr/local/bin/gh", "/snap/bin/gh"]);
+    } else if cfg!(target_os = "windows") {
+        candidates.push("gh.exe");
+    }
+
+    let home = std::env::var("HOME").ok();
+    let home_candidates = home
+        .as_deref()
+        .map(|home| vec![format!("{home}/.local/bin/gh")])
+        .unwrap_or_default();
+
+    let mut output = None;
+    let mut tried = Vec::new();
+
+    for candidate in candidates
+        .into_iter()
+        .map(str::to_string)
+        .chain(home_candidates.into_iter())
+    {
+        if tried.contains(&candidate) {
+            continue;
+        }
+        tried.push(candidate.clone());
+        match Command::new(&candidate)
+            .args(["auth", "token", "--hostname", "github.com"])
+            .output()
+        {
+            Ok(result) => {
+                output = Some((candidate, result));
+                break;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(AppError::new(
+                    "cli",
+                    format!("failed to run GitHub CLI ({candidate}): {err}"),
+                ));
+            }
+        }
+    }
+
+    let (gh_path, output) = output.ok_or_else(|| {
+        AppError::new(
+            "cli",
+            format!(
+                "GitHub CLI not found. RunnerBuddy looked for: {}. Install `gh`, or launch RunnerBuddy from a terminal after `gh auth login`.",
+                tried.join(", ")
+            ),
+        )
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let message = stderr.trim();
+        let message = if message.is_empty() {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        } else {
+            message.to_string()
+        };
+        let message = message
+            .lines()
+            .take(20)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+
+        let lowered = message.to_lowercase();
+        let hint = if lowered.contains("not logged")
+            || lowered.contains("not logged in")
+            || lowered.contains("authentication")
+        {
+            " Run `gh auth login` in a terminal."
+        } else {
+            ""
+        };
+
+        return Err(AppError::new(
+            "cli",
+            format!("GitHub CLI token request failed ({gh_path}).{hint}\n{message}"),
+        ));
+    }
+
+    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if token.is_empty() {
+        return Err(AppError::new(
+            "cli",
+            "GitHub CLI returned an empty token. Run `gh auth login` and try again.",
+        ));
+    }
+
+    Ok(token)
+}
+
 #[tauri::command]
 async fn auth_save_pat(alias: String, pat: String) -> AppResult<()> {
     secrets::save_pat(&alias, &pat).map_err(AppError::from)?;
     info!("PAT stored in credential store for alias {alias}");
+    Ok(())
+}
+
+#[tauri::command]
+async fn auth_import_gh_token(alias: String) -> AppResult<()> {
+    let token = gh_token_from_cli()?;
+    secrets::save_pat(&alias, &token).map_err(AppError::from)?;
+    info!("GitHub CLI token imported into credential store for alias {alias}");
     Ok(())
 }
 
@@ -575,12 +686,43 @@ async fn auth_set_default_alias(state: State<'_, AppState>, alias: String) -> Ap
 
 #[tauri::command]
 async fn github_get_registration_token(scope: config::RunnerScope, alias: String) -> AppResult<github_api::RegistrationToken> {
+    info!("GitHub registration token requested for {} via alias {}", scope.url(), alias);
     let pat = secrets::load_pat(&alias).map_err(AppError::from)?;
     let pat = pat.ok_or_else(|| AppError::new("secrets", "PAT not found in keychain"))?;
     let token = github_api::get_registration_token(&scope, &pat)
         .await
         .map_err(AppError::from)?;
     Ok(token)
+}
+
+#[tauri::command]
+async fn github_list_repos(alias: String) -> AppResult<Vec<github_api::RepoInfo>> {
+    info!("GitHub repo list requested via alias {}", alias);
+    let pat = secrets::load_pat(&alias).map_err(AppError::from)?;
+    let pat = pat.ok_or_else(|| AppError::new("secrets", "PAT not found in keychain"))?;
+    let repos = github_api::list_repos(&pat).await.map_err(AppError::from)?;
+    info!("GitHub repo list returned {} repos for alias {}", repos.len(), alias);
+    Ok(repos)
+}
+
+#[tauri::command]
+async fn github_list_orgs(alias: String) -> AppResult<Vec<github_api::OrgInfo>> {
+    info!("GitHub org list requested via alias {}", alias);
+    let pat = secrets::load_pat(&alias).map_err(AppError::from)?;
+    let pat = pat.ok_or_else(|| AppError::new("secrets", "PAT not found in keychain"))?;
+    let orgs = github_api::list_orgs(&pat).await.map_err(AppError::from)?;
+    info!("GitHub org list returned {} orgs for alias {}", orgs.len(), alias);
+    Ok(orgs)
+}
+
+#[tauri::command]
+async fn runner_repair_scope(
+    state: State<'_, AppState>,
+    runner_id: String,
+) -> AppResult<RunnerProfile> {
+    info!("Runner scope repair requested for {runner_id}");
+    runner_mgmt::repair_runner_scope(&state.config, &runner_id)
+        .map_err(AppError::from)
 }
 
 #[tauri::command]
@@ -1327,10 +1469,14 @@ pub fn run() {
             runners_delete_profile,
             runners_select,
             auth_save_pat,
+            auth_import_gh_token,
             auth_clear_pat,
             auth_check_pat,
             auth_set_default_alias,
             github_get_registration_token,
+            github_list_repos,
+            github_list_orgs,
+            runner_repair_scope,
             runner_download,
             runner_configure,
             runner_start,

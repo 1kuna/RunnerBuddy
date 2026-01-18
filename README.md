@@ -27,7 +27,7 @@ RunnerBuddy is a Tauri desktop app that manages multiple GitHub Actions self-hos
 
 - Node.js + npm
 - Rust toolchain
-- GitHub PAT with required scopes
+- GitHub auth: GitHub CLI (`gh auth login`) or a GitHub PAT with required scopes
 
 ### Install dependencies
 
