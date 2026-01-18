@@ -425,7 +425,7 @@
                 {#each discoveryCandidates as candidate}
                   <div class="rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-3 text-sm">
                     <p class="font-semibold text-white">{candidate.runner_name ?? "Unknown runner"}</p>
-                    <p class="text-xs text-slate-400">{candidate.install_path}</p>
+                    <p class="break-all text-xs text-slate-400">{candidate.install_path}</p>
                     <p class="text-xs text-slate-500">Scope: {scopeLabel(candidate.scope ?? null)}</p>
                     {#if candidate.service_present}
                       <p class="text-xs text-slate-500">
@@ -531,7 +531,7 @@
                   <div class="flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <p class="text-sm font-semibold text-white">{candidate.runner_name ?? "Unknown runner"}</p>
-                      <p class="text-xs text-slate-400">{candidate.install_path}</p>
+                      <p class="break-all text-xs text-slate-400">{candidate.install_path}</p>
                       <p class="text-xs text-slate-500">Scope: {scopeLabel(candidate.scope ?? null)}</p>
                     </div>
                     <label class="flex items-center gap-2 text-xs text-slate-300">

@@ -820,8 +820,8 @@
                   }`}
                   onclick={() => handleSelectRunner(runner.runner_id)}
                 >
-                  <div class="flex items-center justify-between">
-                    <span class="font-semibold">{runner.display_name}</span>
+                  <div class="flex min-w-0 items-center justify-between gap-2">
+                    <span class="min-w-0 flex-1 truncate font-semibold">{runner.display_name}</span>
                     <span
                       class={`h-2 w-2 rounded-full ${
                         snapshot?.runtime[runner.runner_id]?.status === "running"
@@ -832,7 +832,7 @@
                       }`}
                     ></span>
                   </div>
-                  <p class="mt-1 text-xs text-slate-400">
+                  <p class="mt-1 break-all text-xs text-slate-400">
                     {runner.install.mode} · {runner.service.provider} · {runner.install.install_path}
                   </p>
                 </button>
@@ -1256,10 +1256,10 @@
                       <p class="text-sm font-semibold text-white">
                         {candidate.runner_name ?? "Unknown runner"}
                       </p>
-                      <p class="text-xs text-slate-400">{candidate.install_path}</p>
+                      <p class="break-all text-xs text-slate-400">{candidate.install_path}</p>
                       <p class="text-xs text-slate-500">Scope: {scopeLabel(candidate.scope ?? null)}</p>
                       {#if candidate.service_present}
-                        <p class="text-xs text-slate-500">
+                        <p class="break-all text-xs text-slate-500">
                           Service: {candidate.service_id ?? "external"}{candidate.service_path ? ` · ${candidate.service_path}` : ""}
                         </p>
                       {/if}
@@ -1426,7 +1426,7 @@
                       Status: <span class="text-slate-200">{migrationStatus(selectedRunner())}</span>
                     </p>
                     {#if selectedRunner()?.install.adopted_from_path}
-                      <p class="text-xs text-slate-400">
+                      <p class="break-all text-xs text-slate-400">
                         Original: {selectedRunner()?.install.adopted_from_path}
                       </p>
                     {/if}
