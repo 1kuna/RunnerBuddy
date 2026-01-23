@@ -571,14 +571,9 @@ pub fn default_install_path(runner_id: &str) -> Result<PathBuf, Error> {
 }
 
 pub fn default_work_dir(runner_id: &str) -> PathBuf {
-    let data = data_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let work_root = if data.to_string_lossy().contains(' ') {
-        directories::UserDirs::new()
-            .map(|dirs| dirs.home_dir().join(".runnerbuddy"))
-            .unwrap_or(data)
-    } else {
-        data
-    };
+    let work_root = directories::UserDirs::new()
+        .map(|dirs| dirs.home_dir().join(".runnerbuddy"))
+        .unwrap_or_else(|| data_dir().unwrap_or_else(|_| PathBuf::from(".")));
     work_root.join("work").join(runner_id)
 }
 

@@ -1512,7 +1512,7 @@
                     />
                       <input
                         class="w-full rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-2 text-sm text-white"
-                        placeholder="Work directory (leave blank for default)"
+                        placeholder="Work directory (default: ~/.runnerbuddy/work/...)"
                         bind:value={workDir}
                         oninput={markConfigDirty}
                       />
