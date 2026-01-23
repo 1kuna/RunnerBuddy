@@ -484,10 +484,15 @@ async fn runners_create_profile(
     }
     let work_dir = input
         .work_dir
+        .and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
         .unwrap_or_else(|| default_work_dir(&runner_id).to_string_lossy().to_string());
-    if work_dir.trim().is_empty() {
-        return Err(AppError::new("runner", "work directory is required"));
-    }
     let install_path = default_install_path(&runner_id)
         .map_err(AppError::from)?
         .to_string_lossy()

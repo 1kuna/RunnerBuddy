@@ -589,13 +589,14 @@
         errorMessage = "Scope is incomplete.";
         return;
       }
+      const workDirValue = workDir.trim();
       let runnerId = createdRunnerId;
       if (!runnerId) {
         runnerId = await createRunnerProfile({
           display_name: displayName.trim() || runnerName.trim(),
           runner_name: runnerName.trim(),
           labels: labelsArray(),
-          work_dir: workDir.trim(),
+          work_dir: workDirValue,
           scope,
           pat_alias: patAlias,
         });
@@ -607,7 +608,7 @@
         scope,
         name: runnerName.trim(),
         labels: labelsArray(),
-        workDir: workDir.trim(),
+        workDir: workDirValue,
       });
       await refreshState();
       await handleSelectRunner(runnerId);
@@ -1509,12 +1510,12 @@
                       bind:value={runnerLabels}
                       oninput={markConfigDirty}
                     />
-                    <input
-                      class="w-full rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-2 text-sm text-white"
-                      placeholder="Work directory"
-                      bind:value={workDir}
-                      oninput={markConfigDirty}
-                    />
+                      <input
+                        class="w-full rounded-xl border border-slate-500/40 bg-slate-950/40 px-4 py-2 text-sm text-white"
+                        placeholder="Work directory (leave blank for default)"
+                        bind:value={workDir}
+                        oninput={markConfigDirty}
+                      />
                     <div class="flex flex-wrap gap-3">
                       <button
                         class="rounded-xl border border-slate-500/40 px-4 py-2 text-sm font-semibold text-slate-200"
@@ -1525,7 +1526,7 @@
                       <button
                         class="rounded-xl bg-tide-500 px-4 py-2 text-sm font-semibold text-white"
                         onclick={() => (wizardStep = 4)}
-                        disabled={!runnerName.trim() || !workDir.trim()}
+                        disabled={!runnerName.trim()}
                       >
                         Continue
                       </button>

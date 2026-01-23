@@ -100,6 +100,14 @@ pub async fn configure_runner(
         Error::Runner("no PAT found in credential store; save a token first".into())
     })?;
     let token = github_api::get_registration_token(&scope, &pat).await?;
+    let work_dir = if work_dir.trim().is_empty() {
+        profile.work_dir.clone()
+    } else {
+        work_dir
+    };
+    if work_dir.trim().is_empty() {
+        return Err(Error::Runner("work directory is required".into()));
+    }
     let install_path = expand_path(&profile.install.install_path);
     let config_script = runner_script_path(&install_path, RunnerScriptKind::Config)?;
     let work_dir_path = expand_path(&work_dir);
