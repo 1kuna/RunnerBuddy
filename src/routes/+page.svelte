@@ -38,6 +38,7 @@
     installService,
     listLogSources,
     runnersList,
+    runnersDefaultProfile,
     resetOnboarding,
     savePat,
     importGhToken,
@@ -61,6 +62,7 @@
     type RunnerScope,
     type RunnerStatus,
     type ServiceStatus,
+    type RunnerDefaults,
     type SettingsSnapshot
   } from "$lib/api";
 
@@ -85,6 +87,10 @@
   let showCreate = $state(false);
   let wizardStep = $state(1);
   let createdRunnerId = $state<string | null>(null);
+  let draftRunnerId = $state<string | null>(null);
+  let createDraftDirty = $state(false);
+  let createDefaultsBusy = $state(false);
+  let createDefaultsError = $state<string | null>(null);
 
   let patAlias = $state("default");
   let patInput = $state("");
@@ -274,8 +280,63 @@
     }
   }
 
+  function applyCreateDefaults(defaults: RunnerDefaults) {
+    draftRunnerId = defaults.runner_id;
+    displayName = defaults.display_name;
+    runnerName = defaults.runner_name;
+    runnerLabels = defaults.labels.join(", ");
+    workDir = defaults.work_dir;
+  }
+
+  async function loadCreateDefaults() {
+    if (createDefaultsBusy) return;
+    createDefaultsError = null;
+    createDefaultsBusy = true;
+    try {
+      const defaults = await runnersDefaultProfile();
+      draftRunnerId = defaults.runner_id;
+      if (!createDraftDirty) {
+        applyCreateDefaults(defaults);
+      }
+    } catch (error) {
+      createDefaultsError = formatError(error);
+    } finally {
+      createDefaultsBusy = false;
+    }
+  }
+
+  function resetCreateWizard() {
+    wizardStep = 1;
+    createdRunnerId = null;
+    draftRunnerId = null;
+    createDraftDirty = false;
+    createDefaultsError = null;
+    clearScopeHelpers();
+    displayName = "";
+    runnerName = "";
+    runnerLabels = "";
+    workDir = "";
+    scopeType = "repo";
+    scopeOwner = "";
+    scopeRepo = "";
+    scopeOrg = "";
+    scopeEnterprise = "";
+  }
+
+  function openCreate() {
+    resetCreateWizard();
+    showCreate = true;
+    void loadCreateDefaults();
+  }
+
+  function closeCreate() {
+    showCreate = false;
+  }
+
   function markConfigDirty() {
-    if (!showCreate) {
+    if (showCreate) {
+      createDraftDirty = true;
+    } else {
       configDraftDirty = true;
     }
   }
@@ -590,9 +651,10 @@
         return;
       }
       const workDirValue = workDir.trim();
-      let runnerId = createdRunnerId;
-      if (!runnerId) {
+      let runnerId = createdRunnerId ?? draftRunnerId ?? null;
+      if (!createdRunnerId) {
         runnerId = await createRunnerProfile({
+          runner_id: runnerId ?? undefined,
           display_name: displayName.trim() || runnerName.trim(),
           runner_name: runnerName.trim(),
           labels: labelsArray(),
@@ -601,6 +663,10 @@
           pat_alias: patAlias,
         });
         createdRunnerId = runnerId;
+      }
+      if (!runnerId) {
+        errorMessage = "Failed to create runner profile.";
+        return;
       }
       await downloadRunner(runnerId);
       await configureRunner({
@@ -1152,7 +1218,7 @@
             <h2 class="text-sm uppercase tracking-[0.2em] text-slate-400">Runners</h2>
             <button
               class="rounded-full border border-slate-400/30 px-3 py-1 text-xs text-slate-200"
-              onclick={() => (showCreate = !showCreate)}
+              onclick={() => (showCreate ? closeCreate() : openCreate())}
             >
               {showCreate ? "Close" : "Add"}
             </button>
@@ -1358,7 +1424,7 @@
               </div>
               <button
                 class="rounded-xl border border-slate-500/40 px-4 py-2 text-sm font-semibold text-slate-200"
-                onclick={() => (showCreate = false)}
+                onclick={closeCreate}
               >
                 Close
               </button>

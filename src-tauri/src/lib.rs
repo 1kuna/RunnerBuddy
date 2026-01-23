@@ -62,6 +62,15 @@ struct SettingsSnapshot {
     settings: SettingsConfig,
 }
 
+#[derive(serde::Serialize)]
+struct RunnerDefaults {
+    runner_id: String,
+    display_name: String,
+    runner_name: String,
+    labels: Vec<String>,
+    work_dir: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct SettingsPatch {
     auto_updates_enabled: Option<bool>,
@@ -456,6 +465,7 @@ async fn onboarding_reset(state: State<'_, AppState>) -> AppResult<SettingsSnaps
 
 #[derive(Debug, Deserialize)]
 struct CreateRunnerProfileInput {
+    runner_id: Option<String>,
     display_name: Option<String>,
     runner_name: Option<String>,
     labels: Option<Vec<String>>,
@@ -469,8 +479,20 @@ async fn runners_create_profile(
     state: State<'_, AppState>,
     input: CreateRunnerProfileInput,
 ) -> AppResult<String> {
-    let runner_id = crate::config::new_runner_id();
+    let runner_id = input
+        .runner_id
+        .unwrap_or_else(crate::config::new_runner_id);
     let config = state.config.get();
+    if config
+        .runners
+        .iter()
+        .any(|runner| runner.runner_id == runner_id)
+    {
+        return Err(AppError::new(
+            "runner",
+            "runner id already exists; refresh defaults and try again",
+        ));
+    }
     let runner_name = input.runner_name.unwrap_or_else(util::default_runner_name);
     if runner_name.trim().is_empty() {
         return Err(AppError::new("runner", "runner name is required"));
@@ -528,6 +550,22 @@ async fn runners_create_profile(
         .map_err(AppError::from)?;
 
     Ok(runner_id)
+}
+
+#[tauri::command]
+async fn runners_default_profile() -> AppResult<RunnerDefaults> {
+    let runner_id = crate::config::new_runner_id();
+    let runner_name = util::default_runner_name();
+    let display_name = runner_name.clone();
+    let labels = default_runner_labels();
+    let work_dir = default_work_dir(&runner_id).to_string_lossy().to_string();
+    Ok(RunnerDefaults {
+        runner_id,
+        display_name,
+        runner_name,
+        labels,
+        work_dir,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -1413,6 +1451,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             runners_list,
+            runners_default_profile,
             settings_get,
             settings_update,
             onboarding_complete,

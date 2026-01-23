@@ -106,6 +106,14 @@ export interface AppSnapshot {
   runtime: Record<string, RuntimeState>;
 }
 
+export interface RunnerDefaults {
+  runner_id: string;
+  display_name: string;
+  runner_name: string;
+  labels: string[];
+  work_dir: string;
+}
+
 export interface SettingsSnapshot {
   onboarding: OnboardingConfig;
   settings: SettingsConfig;
@@ -155,6 +163,9 @@ const call = <T>(command: string, args?: Record<string, unknown>): Promise<T> =>
 
 export const runnersList = (): Promise<AppSnapshot> => call("runners_list");
 
+export const runnersDefaultProfile = (): Promise<RunnerDefaults> =>
+  call("runners_default_profile");
+
 export const getSettings = (): Promise<SettingsSnapshot> => call("settings_get");
 
 export const updateSettings = (
@@ -168,6 +179,7 @@ export const resetOnboarding = (): Promise<SettingsSnapshot> =>
   call("onboarding_reset");
 
 export const createRunnerProfile = (params: {
+  runner_id?: string;
   display_name?: string;
   runner_name?: string;
   labels?: string[];
