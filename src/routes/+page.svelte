@@ -1532,7 +1532,6 @@
                       onLoadRepos={handleLoadRepos}
                       onLoadOrgs={handleLoadOrgs}
                       showTokenTools
-                      scopeIsComplete={scopeIsComplete}
                       onOpenSettings={handleOpenRunnersSettings}
                       onFetchToken={handleFetchRegistrationToken}
                       onCopyToken={handleCopyRegistrationToken}

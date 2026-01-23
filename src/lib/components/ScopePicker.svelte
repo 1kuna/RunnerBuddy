@@ -27,7 +27,6 @@
   export let onLoadOrgs: (() => void | Promise<void>) | undefined;
 
   export let showTokenTools = false;
-  export let scopeIsComplete: (() => boolean) | undefined = undefined;
   export let onOpenSettings: (() => void | Promise<void>) | undefined = undefined;
   export let onFetchToken: (() => void | Promise<void>) | undefined = undefined;
   export let onCopyToken: (() => void | Promise<void>) | undefined = undefined;
@@ -93,7 +92,13 @@
   }
 
   function isScopeCompleteValue() {
-    return scopeIsComplete ? scopeIsComplete() : false;
+    if (scopeType === "repo") {
+      return !!scopeOwner.trim() && !!scopeRepo.trim();
+    }
+    if (scopeType === "org") {
+      return !!scopeOrg.trim();
+    }
+    return !!scopeEnterprise.trim();
   }
 </script>
 
